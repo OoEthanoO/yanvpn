@@ -1,0 +1,361 @@
+#!/usr/bin/env bash
+# yanvpn — Linux client. Falls back across three transports.
+#
+#   yanvpn up [transport]  connect, trying the fastest thing that works
+#   yanvpn down            disconnect everything
+#   yanvpn status          what's connected and where traffic exits
+#   yanvpn doctor          probe every transport and port; say what this network blocks
+#   yanvpn pin <ip>        dial an IP directly, bypassing DNS
+#   yanvpn auto            connect at boot
+
+set -uo pipefail
+
+BOLD=$'\e[1m'; RED=$'\e[31m'; GRN=$'\e[32m'; YEL=$'\e[33m'; DIM=$'\e[2m'; RST=$'\e[0m'
+ok()   { printf '  %s✓%s %s\n' "$GRN" "$RST" "$*"; }
+bad()  { printf '  %s✗%s %s\n' "$RED" "$RST" "$*"; }
+warn() { printf '  %s!%s %s\n' "$YEL" "$RST" "$*"; }
+info() { printf '  %s·%s %s\n' "$DIM" "$RST" "$*"; }
+die()  { printf '%s✗ %s%s\n' "$RED" "$*" "$RST" >&2; exit 1; }
+
+IF=yanvpn
+WG_CONF=/etc/wireguard/${IF}.conf
+AWG_CONF=/etc/amnezia/amneziawg/${IF}.conf
+SB_CONF=/etc/sing-box/yanvpn.json
+STATE=/var/lib/yanvpn/state
+
+# Ports to probe per transport, best first. 443 is first because a firewall that
+# permits HTTP/3 sees UDP/443 and hesitates to drop it.
+WG_PORTS=${WG_PORTS:-"51820 443 53"}
+AWG_PORTS=${AWG_PORTS:-"443 53 51821"}
+
+need_root() { [[ $EUID -eq 0 ]] || die "Run as root:  sudo yanvpn $*"; }
+
+have_wg()      { [[ -r $WG_CONF ]]; }
+have_awg()     { [[ -r $AWG_CONF ]] && command -v awg-quick >/dev/null; }
+have_reality() { [[ -r $SB_CONF ]] && command -v sing-box >/dev/null; }
+
+wg_is_up()      { ip link show "$IF" >/dev/null 2>&1 && [[ -r $WG_CONF ]] && wg show "$IF" >/dev/null 2>&1; }
+awg_is_up()     { command -v awg >/dev/null && awg show "$IF" >/dev/null 2>&1; }
+sb_is_up()      { systemctl is-active --quiet yanvpn-singbox 2>/dev/null; }
+anything_up()   { wg_is_up || awg_is_up || sb_is_up; }
+
+# Bring an interface up, returning its error text on failure. Swallowing this
+# is what makes "interface could not be created" look like "port blocked".
+_iface_up() {
+  local quick out; quick=$(quick_for "$1")
+  out=$("$quick" up "$IF" 2>&1) && return 0
+  printf '%s' "$out"
+  return 1
+}
+
+conf_for()      { [[ $1 == wg ]] && echo "$WG_CONF" || echo "$AWG_CONF"; }
+tool_for()      { [[ $1 == wg ]] && echo wg || echo awg; }
+quick_for()     { [[ $1 == wg ]] && echo wg-quick || echo awg-quick; }
+
+endpoint_host() { awk '/^\s*Endpoint/{split($3,a,":"); print a[1]; exit}' "$(conf_for "$1")"; }
+srv_ip()        { awk '/^\s*DNS/{print $3; exit}' "$(conf_for "$1")"; }
+
+save_state() { install -d -m 700 /var/lib/yanvpn; printf 'LAST=%s\nLAST_PORT=%s\n' "$1" "${2:-}" >"$STATE"; }
+load_state() { [[ -r $STATE ]] && source "$STATE"; : "${LAST:=}" "${LAST_PORT:=}"; }
+
+public_ip() { curl -4 -fsS --max-time 8 https://api.ipify.org 2>/dev/null; }
+
+# --------------------------------------------------------- WireGuard-family try
+set_conf_port() {  # $1=kind $2=port
+  sed -i -E "s|^(\s*Endpoint\s*=\s*[^:]+):[0-9]+|\1:${2}|" "$(conf_for "$1")"
+}
+
+# Probe one port by bringing the interface up fresh on it.
+#
+# A fresh interface is the only unambiguous test. PersistentKeepalive
+# establishes the tunnel the moment it comes up, and WireGuard then will not
+# re-handshake for ~2 minutes -- and pointing an *existing* session at a new
+# endpoint reuses that session rather than renegotiating. So watching for the
+# handshake timestamp to change reports working ports as blocked.
+#
+# Returns: 0 = handshake ok, 1 = no handshake, 2 = interface would not come up
+#          (error text left in PROBE_ERR).
+PROBE_ERR=""
+_probe_port() {
+  local kind=$1 port=$2 timeout=${3:-8} quick tool i now
+  quick=$(quick_for "$kind"); tool=$(tool_for "$kind")
+  PROBE_ERR=""
+
+  "$quick" down "$IF" >/dev/null 2>&1
+  ip link show "$IF" >/dev/null 2>&1 && ip link del "$IF" 2>/dev/null
+  set_conf_port "$kind" "$port"
+  PROBE_ERR=$("$quick" up "$IF" 2>&1) || return 2
+  PROBE_ERR=""
+
+  for ((i = 0; i < timeout * 2; i++)); do
+    now=$("$tool" show "$IF" latest-handshakes 2>/dev/null | awk '{print $2; exit}')
+    [[ -n ${now:-} && $now != 0 ]] && return 0
+    sleep 0.5
+  done
+  return 1
+}
+
+_try_wgfam() {
+  local kind=$1 quiet=${2:-no} quick ports p first rc
+  quick=$(quick_for "$kind")
+  ports=$([[ $kind == wg ]] && echo "$WG_PORTS" || echo "$AWG_PORTS")
+
+  # Lead with the port that worked last time.
+  load_state
+  if [[ $LAST == "$kind" && -n $LAST_PORT ]]; then
+    first=$LAST_PORT
+    ports="$first $(tr ' ' '\n' <<<"$ports" | grep -vx "$first" | tr '\n' ' ')"
+  fi
+
+  for p in $ports; do
+    [[ $quiet == no ]] && printf '    UDP %-6s ' "$p"
+    _probe_port "$kind" "$p" 8; rc=$?
+    case $rc in
+      0) [[ $quiet == no ]] && printf '%s✓%s\n' "$GRN" "$RST"
+         save_state "$kind" "$p"; return 0 ;;
+      2) if [[ $quiet == no ]]; then
+           printf '%sinterface failed%s\n' "$RED" "$RST"
+           printf '%s\n' "$PROBE_ERR" | sed 's/^/      /'
+         fi
+         return 1 ;;
+      *) [[ $quiet == no ]] && printf '%s✗%s\n' "$RED" "$RST" ;;
+    esac
+  done
+  "$quick" down "$IF" >/dev/null 2>&1
+  return 1
+}
+
+# ----------------------------------------------------------------- REALITY try
+_try_reality() {
+  systemctl start yanvpn-singbox >/dev/null 2>&1 || return 1
+  local i
+  for ((i = 0; i < 20; i++)); do
+    sleep 0.5
+    systemctl is-active --quiet yanvpn-singbox || return 1
+    # sing-box owns the default route once its tun is up, so a successful fetch
+    # means traffic really is flowing through the tunnel.
+    if curl -4 -fsS --max-time 5 https://api.ipify.org >/dev/null 2>&1; then
+      save_state reality ""
+      return 0
+    fi
+  done
+  systemctl stop yanvpn-singbox >/dev/null 2>&1
+  return 1
+}
+
+_down_all() {
+  wg_is_up  && wg-quick  down "$IF" >/dev/null 2>&1
+  awg_is_up && awg-quick down "$IF" >/dev/null 2>&1
+  sb_is_up  && systemctl stop yanvpn-singbox >/dev/null 2>&1
+  # WireGuard and AmneziaWG share the interface name, so a half-created link
+  # left by a failed attempt blocks the next 'up' with "File exists" -- which
+  # then reads as a network failure rather than a local one.
+  ip link show "$IF" >/dev/null 2>&1 && ip link del "$IF" 2>/dev/null
+  return 0
+}
+
+# --------------------------------------------------------------------- up/down
+cmd_up() {
+  need_root up
+  local only=${1:-}
+  if anything_up; then ok "Already connected."; cmd_status; return 0; fi
+
+  # Fastest first. AmneziaWG costs a little throughput over plain WireGuard;
+  # REALITY costs considerably more, being TCP.
+  local order=(wg awg reality)
+  [[ -n $only ]] && order=("$only")
+
+  # If a transport worked last time, lead with it — saves ~20s of probing on
+  # the network you actually use.
+  load_state
+  if [[ -z $only && -n $LAST ]]; then
+    order=("$LAST" $(printf '%s\n' wg awg reality | grep -vx "$LAST"))
+  fi
+
+  local t
+  for t in "${order[@]}"; do
+    case $t in
+      wg)      have_wg      || continue; printf '%s==>%s WireGuard\n' "$BOLD" "$RST"
+               _try_wgfam wg      && { echo; ok "Connected over WireGuard."; cmd_status; return 0; } ;;
+      awg)     have_awg     || continue; printf '%s==>%s AmneziaWG (obfuscated)\n' "$BOLD" "$RST"
+               _try_wgfam awg     && { echo; ok "Connected over AmneziaWG."; cmd_status; return 0; } ;;
+      reality) have_reality || continue; printf '%s==>%s VLESS + REALITY (TCP 443)\n' "$BOLD" "$RST"
+               printf '    connecting  '
+               if _try_reality; then printf '%s✓%s\n\n' "$GRN" "$RST"
+                 ok "Connected over REALITY."; cmd_status; return 0
+               fi; printf '%s✗%s\n' "$RED" "$RST" ;;
+    esac
+  done
+
+  _down_all
+  echo; bad "No transport got through."
+  info "Run 'yanvpn doctor' for detail. Most likely one of:"
+  info "  · the server is down, or its public IP moved (set up DDNS)"
+  info "  · router port forwards missing — REALITY needs TCP 443 forwarded, separately"
+  info "    from the UDP rules"
+  info "  · this network blocks everything except proxied HTTP, in which case"
+  info "    nothing short of a corporate-proxy-aware transport will work"
+  return 1
+}
+
+cmd_down() {
+  need_root down
+  anything_up || { ok "Not connected."; return 0; }
+  _down_all
+  ok "Disconnected."
+}
+
+cmd_status() {
+  if ! anything_up; then printf '  %sdisconnected%s\n' "$DIM" "$RST"; return 0; fi
+  local ip
+  if wg_is_up; then
+    ok "WireGuard up — $(wg show "$IF" endpoints | awk '{print $2}')"
+  elif awg_is_up; then
+    ok "AmneziaWG up — $(awg show "$IF" endpoints | awk '{print $2}')"
+  elif sb_is_up; then
+    ok "REALITY up — TCP, masked as HTTPS"
+  fi
+  ip=$(public_ip)
+  if [[ -n ${ip:-} ]]; then
+    ok "Traffic exits from ${BOLD}${ip}${RST} (should be your home IP)"
+  else
+    warn "Tunnel is up but no traffic is getting out."
+  fi
+}
+
+# -------------------------------------------------------------------- doctor
+cmd_doctor() {
+  need_root doctor
+  local was_up=no; anything_up && was_up=yes
+  _down_all
+
+  printf '%s==>%s Probing this network\n\n' "$BOLD" "$RST"
+
+  local host=""
+  have_wg && host=$(endpoint_host wg)
+  if [[ -n $host && ! $host =~ ^[0-9.]+$ ]]; then
+    local r; r=$(getent hosts "$host" | awk '{print $1; exit}')
+    if [[ -n ${r:-} ]]; then ok "DNS: ${host} -> ${r}"
+    else bad "DNS: cannot resolve ${host} — this network's resolver may be filtering it."
+         info "     Workaround: sudo yanvpn pin <your.home.ip>"; fi
+  fi
+
+  local wg_ok="" awg_ok="" rt_ok=no wg_failed=no awg_failed=no rc p
+  if have_wg; then
+    printf '\n%sWireGuard%s %s(plain — expected to fail on a network that fingerprints it)%s\n' \
+      "$BOLD" "$RST" "$DIM" "$RST"
+    for p in $WG_PORTS; do
+      printf '    UDP %-6s ' "$p"
+      _probe_port wg "$p" 8; rc=$?
+      case $rc in
+        0) printf '%sopen%s\n' "$GRN" "$RST"; wg_ok+="$p " ;;
+        2) printf '%sinterface failed%s\n' "$RED" "$RST"
+           printf '%s\n' "$PROBE_ERR" | sed 's/^/      /'; wg_failed=yes; break ;;
+        *) printf '%sblocked%s\n' "$RED" "$RST" ;;
+      esac
+    done
+    # Probing rewrites the config's port, so leave it on something that works.
+    [[ -n $wg_ok ]] && set_conf_port wg "${wg_ok%% *}"
+    _down_all
+  fi
+
+  if have_awg; then
+    printf '\n%sAmneziaWG%s %s(obfuscated — tells you whether UDP works at all)%s\n' \
+      "$BOLD" "$RST" "$DIM" "$RST"
+    for p in $AWG_PORTS; do
+      printf '    UDP %-6s ' "$p"
+      _probe_port awg "$p" 8; rc=$?
+      case $rc in
+        0) printf '%sopen%s\n' "$GRN" "$RST"; awg_ok+="$p " ;;
+        2) printf '%sinterface failed%s\n' "$RED" "$RST"
+           printf '%s\n' "$PROBE_ERR" | sed 's/^/      /'; awg_failed=yes; break ;;
+        *) printf '%sblocked%s\n' "$RED" "$RST" ;;
+      esac
+    done
+    [[ -n $awg_ok ]] && set_conf_port awg "${awg_ok%% *}"
+    _down_all
+  fi
+
+  if have_reality; then
+    printf '\n%sVLESS + REALITY%s %s(TCP 443, masked as HTTPS)%s\n' "$BOLD" "$RST" "$DIM" "$RST"
+    printf '    TCP 443    '
+    if _try_reality; then printf '%sopen%s\n' "$GRN" "$RST"; rt_ok=yes
+      systemctl stop yanvpn-singbox >/dev/null 2>&1
+    else
+      printf '%sfailed%s\n' "$RED" "$RST"
+      journalctl -u yanvpn-singbox -n 3 --no-pager 2>/dev/null \
+        | grep -iE 'fatal|error' | tail -2 | sed 's/^.*]: /      /'
+    fi
+  fi
+
+  # ------------------------------------------------------------- interpretation
+  printf '\n%s==>%s What this means\n\n' "$BOLD" "$RST"
+  if [[ -n $wg_ok ]]; then
+    ok "Plain WireGuard works here (${wg_ok%% *}). This network isn't fingerprinting after all."
+  elif [[ -n $awg_ok ]]; then
+    ok "UDP is fine, but plain WireGuard is blocked — so they are matching its"
+    info "  signature, exactly as expected. AmneziaWG on UDP ${awg_ok%% *} is your fast path."
+  elif [[ $rt_ok == yes ]]; then
+    ok "All UDP is blocked; only TCP/443 survives. REALITY is your only option here,"
+    info "  and it is working. Expect lower throughput than WireGuard — that's the tax."
+  elif [[ $wg_failed == yes && $awg_failed == yes ]]; then
+    bad "No transport could even create its interface — this is a local setup"
+    info "  problem, not a network one. The errors above are the real cause."
+  else
+    bad "Nothing got through on any transport."
+    info "Before blaming this network, prove the server is alive: connect from a"
+    info "phone hotspot. If that fails too, the problem is at home — port forwards"
+    info "or a changed IP, not the firewall in front of you."
+  fi
+
+  [[ $was_up == yes ]] && { echo; cmd_up; }
+  return 0
+}
+
+cmd_pin() {
+  need_root pin
+  local ip=${1:-}; [[ -n $ip ]] || die "Usage: yanvpn pin <ip-address>"
+  local f
+  for f in "$WG_CONF" "$AWG_CONF"; do
+    [[ -w $f ]] && sed -i -E "s|^(\s*Endpoint\s*=\s*)[^:]+:|\1${ip}:|" "$f"
+  done
+  if [[ -w $SB_CONF ]] && command -v jq >/dev/null; then
+    jq --arg s "$ip" '(.outbounds[] | select(.tag=="proxy") | .server) = $s' "$SB_CONF" >"$SB_CONF.new" \
+      && mv "$SB_CONF.new" "$SB_CONF"
+  fi
+  ok "All transports pinned to ${ip} — DNS is no longer involved."
+}
+
+cmd_auto() {
+  need_root auto
+  load_state
+  [[ -n $LAST ]] || die "Connect once first, so yanvpn knows which transport to use."
+  cat >/etc/systemd/system/yanvpn-auto.service <<EOF
+[Unit]
+Description=yanvpn autoconnect
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/yanvpn up
+ExecStop=/usr/local/bin/yanvpn down
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  systemctl daemon-reload
+  systemctl enable yanvpn-auto >/dev/null 2>&1
+  ok "Will connect at boot, starting with ${LAST}."
+}
+
+case ${1:-status} in
+  up|connect)      shift; cmd_up "$@" ;;
+  down|disconnect) shift; cmd_down "$@" ;;
+  status)          shift; cmd_status "$@" ;;
+  doctor)          shift; cmd_doctor "$@" ;;
+  pin)             shift; cmd_pin "$@" ;;
+  auto)            shift; cmd_auto "$@" ;;
+  *)               sed -n '2,9p' "$0" | sed 's/^# \?//' ;;
+esac

@@ -1,0 +1,279 @@
+#!/usr/bin/env bash
+# vpnctl — manage yanvpn clients.
+#
+#   vpnctl add <name>              create a client on every installed transport
+#   vpnctl qr <name> [transport]   print QR codes (wg | awg | reality)
+#   vpnctl show <name> [transport] print a config to stdout
+#   vpnctl list                    clients, addresses, last handshake
+#   vpnctl remove <name>           revoke everywhere
+#   vpnctl status                  server and transport status
+#   vpnctl endpoint <host>         change the address clients dial
+#   vpnctl regen                   rebuild all configs from the registry
+
+set -euo pipefail
+LIB=${YANVPN_LIB:-/etc/yanvpn/lib.sh}
+[[ -r $LIB ]] || LIB=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/lib.sh
+# shellcheck source=lib.sh
+source "$LIB"
+
+[[ $EUID -eq 0 ]] || die "Run as root:  sudo vpnctl $*"
+load_config
+
+valid_name() { [[ $1 =~ ^[a-zA-Z0-9][a-zA-Z0-9_-]{0,30}$ ]]; }
+
+# ------------------------------------------------------------ client configs
+gen_wg_conf() {
+  cat <<EOF
+[Interface]
+PrivateKey = ${CL_WG_PRIV}
+Address    = ${WG_NET4}.${CL_HOST}/32
+DNS        = ${WG_NET4}.1
+MTU        = ${CLIENT_MTU}
+
+[Peer]
+PublicKey    = ${WG_PUB}
+PresharedKey = ${CL_WG_PSK}
+Endpoint     = ${ENDPOINT}:${WG_PORT}
+# ::/0 is present although the tunnel is IPv4-only: it blackholes IPv6 so a
+# dual-stack network cannot leak traffic around the VPN.
+AllowedIPs = 0.0.0.0/0, ::/0
+PersistentKeepalive = 25
+EOF
+}
+
+gen_awg_conf() {
+  cat <<EOF
+[Interface]
+PrivateKey = ${CL_AWG_PRIV}
+Address    = ${AWG_NET4}.${CL_HOST}/32
+DNS        = ${AWG_NET4}.1
+MTU        = ${CLIENT_MTU}
+# Obfuscation profile — must match the server exactly.
+Jc  = ${AWG_JC}
+Jmin = ${AWG_JMIN}
+Jmax = ${AWG_JMAX}
+S1  = ${AWG_S1}
+S2  = ${AWG_S2}
+H1  = ${AWG_H1}
+H2  = ${AWG_H2}
+H3  = ${AWG_H3}
+H4  = ${AWG_H4}
+
+[Peer]
+PublicKey    = ${AWG_PUB}
+PresharedKey = ${CL_AWG_PSK}
+Endpoint     = ${ENDPOINT}:443
+AllowedIPs = 0.0.0.0/0, ::/0
+PersistentKeepalive = 25
+EOF
+}
+
+gen_reality_url() {
+  printf 'vless://%s@%s:%s?type=tcp&security=reality&encryption=none&flow=xtls-rprx-vision&sni=%s&fp=chrome&pbk=%s&sid=%s#yanvpn-%s\n' \
+    "$CL_UUID" "$ENDPOINT" "${REALITY_PORT:-443}" "$REALITY_SNI" "$REALITY_PUB" "$REALITY_SID" "$CL_NAME"
+}
+
+# Parameters for the Linux client, which builds its own sing-box JSON so the
+# schema can be matched to whatever sing-box version it ends up installing.
+gen_reality_env() {
+  cat <<EOF
+R_UUID=${CL_UUID}
+R_HOST=${ENDPOINT}
+R_PORT=${REALITY_PORT:-443}
+R_SNI=${REALITY_SNI}
+R_PBK=${REALITY_PUB}
+R_SID=${REALITY_SID}
+R_SBVER=${SINGBOX_VERSION:-}
+EOF
+}
+
+write_client_files() {
+  local d=$CLIENTS/$CL_NAME
+  install -d -m 700 "$d"
+  gen_wg_conf >"$d/wg.conf"
+  if have_awg; then gen_awg_conf >"$d/awg.conf"; else rm -f "$d/awg.conf"; fi
+  if have_reality; then
+    gen_reality_url >"$d/reality.url"
+    gen_reality_env >"$d/reality.env"
+  else
+    rm -f "$d/reality.url" "$d/reality.env"
+  fi
+  chmod 600 "$d"/* 2>/dev/null || true
+}
+
+# ---------------------------------------------------------------- subcommands
+cmd_add() {
+  local name=${1:-}
+  [[ -n $name ]] || die "Usage: vpnctl add <name>"
+  valid_name "$name" || die "Name must start alphanumeric, then letters/digits/-/_ (max 31)."
+  [[ -d $CLIENTS/$name ]] && die "Client '$name' exists. Use 'vpnctl remove $name' first."
+
+  umask 077
+  install -d -m 700 "$CLIENTS/$name"
+  local host wgp awgp
+  host=$(next_host_octet)
+  wgp=$(wg genkey); awgp=$(wg genkey)
+
+  # AmneziaWG and REALITY identities are minted now even if those transports
+  # aren't installed yet, so adding one later needs only 'vpnctl regen'.
+  cat >"$CLIENTS/$name/meta" <<EOF
+CL_NAME=${name}
+CL_HOST=${host}
+CL_WG_PRIV=${wgp}
+CL_WG_PUB=$(printf '%s' "$wgp" | wg pubkey)
+CL_WG_PSK=$(wg genpsk)
+CL_AWG_PRIV=${awgp}
+CL_AWG_PUB=$(printf '%s' "$awgp" | wg pubkey)
+CL_AWG_PSK=$(wg genpsk)
+CL_UUID=$(cat /proc/sys/kernel/random/uuid)
+EOF
+  chmod 600 "$CLIENTS/$name/meta"
+
+  load_client "$name"
+  write_client_files
+  apply_all
+
+  printf '\n%sClient "%s" created%s (host .%s)\n' "$BOLD" "$name" "$RST" "$host"
+  cmd_qr "$name"
+}
+
+_qr_one() {
+  local kind=$1 d=$CLIENTS/$CL_NAME
+  case $kind in
+    wg)
+      [[ -r $d/wg.conf ]] || return 0
+      printf '\n%s── WireGuard ──%s  fastest; blocked on networks that fingerprint it\n' "$BOLD" "$RST"
+      printf '%sofficial WireGuard app%s\n\n' "$DIM" "$RST"
+      qrencode -t ansiutf8 <"$d/wg.conf" ;;
+    awg)
+      [[ -r $d/awg.conf ]] || return 0
+      printf '\n%s── AmneziaWG ──%s  same speed, no WireGuard signature; still UDP\n' "$BOLD" "$RST"
+      printf '%sAmneziaVPN app%s\n\n' "$DIM" "$RST"
+      qrencode -t ansiutf8 <"$d/awg.conf" ;;
+    reality)
+      [[ -r $d/reality.url ]] || return 0
+      printf '\n%s── VLESS + REALITY ──%s  looks like HTTPS to %s; works when UDP is dead\n' \
+        "$BOLD" "$RST" "${REALITY_SNI:-?}"
+      printf '%ssing-box / Streisand / V2Box app%s\n\n' "$DIM" "$RST"
+      qrencode -t ansiutf8 <"$d/reality.url" ;;
+    *) die "Unknown transport '$kind' (wg | awg | reality)" ;;
+  esac
+}
+
+cmd_qr() {
+  local name=${1:-} which=${2:-all}
+  [[ -n $name ]] || die "Usage: vpnctl qr <name> [wg|awg|reality]"
+  load_client "$name" || die "No such client: $name"
+  if [[ $which == all ]]; then
+    for k in wg awg reality; do _qr_one "$k"; done
+    cat <<EOF
+
+${BOLD}Which one to use:${RST} start with AmneziaWG. If the network still blocks it,
+switch to REALITY. Keep WireGuard for home and cellular — it is the fastest.
+
+Linux laptop: copy the whole directory instead of scanning QR codes:
+
+    scp -r root@${ENDPOINT}:${CLIENTS}/${name} .
+    sudo ./client/linux/install.sh ${name}/
+
+EOF
+  else
+    _qr_one "$which"
+  fi
+}
+
+cmd_show() {
+  local name=${1:-} which=${2:-wg}
+  [[ -n $name ]] || die "Usage: vpnctl show <name> [wg|awg|reality]"
+  load_client "$name" || die "No such client: $name"
+  case $which in
+    wg)      cat "$CLIENTS/$name/wg.conf" ;;
+    awg)     cat "$CLIENTS/$name/awg.conf" ;;
+    reality) cat "$CLIENTS/$name/reality.url" ;;
+    *)       die "Unknown transport '$which' (wg | awg | reality)" ;;
+  esac
+}
+
+cmd_list() {
+  local now n hs pub
+  now=$(date +%s)
+  printf '%s%-16s %-6s %-22s %s%s\n' "$BOLD" "NAME" "HOST" "WIREGUARD" "AMNEZIAWG" "$RST"
+  for n in $(client_names); do
+    load_client "$n" || continue
+    local cells=()
+    for pair in "wg:$WG_IF:$CL_WG_PUB" "awg:$AWG_IF:$CL_AWG_PUB"; do
+      local kind=${pair%%:*} rest=${pair#*:} iface key
+      iface=${rest%%:*}; key=${rest#*:}
+      if [[ $kind == awg ]] && ! have_awg; then cells+=("${DIM}n/a${RST}"); continue; fi
+      local tool=wg; [[ $kind == awg ]] && tool=awg
+      hs=$("$tool" show "$iface" latest-handshakes 2>/dev/null | awk -v p="$key" '$1==p{print $2}')
+      if [[ -z ${hs:-} || $hs == 0 ]]; then cells+=("${DIM}never${RST}")
+      else cells+=("$(( (now - hs) / 60 )) min ago"); fi
+    done
+    printf '%-16s %-6s %-22b %b\n' "$n" ".$CL_HOST" "${cells[0]}" "${cells[1]}"
+  done
+}
+
+cmd_remove() {
+  local name=${1:-}
+  [[ -n $name ]] || die "Usage: vpnctl remove <name>"
+  valid_name "$name" || die "Bad name."
+  [[ -d $CLIENTS/$name ]] || die "No such client: $name"
+  rm -rf "${CLIENTS:?}/$name"
+  apply_all
+  ok "Revoked '$name' on every transport — its keys stop working immediately."
+}
+
+cmd_endpoint() {
+  local host=${1:-}
+  [[ -n $host ]] || die "Usage: vpnctl endpoint <hostname-or-ip>"
+  set_cfg ENDPOINT "$host"
+  load_config
+  local n
+  for n in $(client_names); do load_client "$n" && write_client_files; done
+  ok "Endpoint is now ${host}. Re-issue clients with 'vpnctl qr <name>'."
+}
+
+cmd_regen() {
+  local n
+  for n in $(client_names); do load_client "$n" && write_client_files; done
+  apply_all
+  ok "Rebuilt every config from the registry."
+}
+
+cmd_status() {
+  printf '%sEndpoint%s   %s\n' "$BOLD" "$RST" "$ENDPOINT"
+  printf '%sClients%s    %s\n\n' "$BOLD" "$RST" "$(client_names | wc -l)"
+
+  printf '%s%-14s %-10s %-24s %s%s\n' "$BOLD" "TRANSPORT" "STATE" "LISTENING" "NOTE" "$RST"
+  printf '%-14s %-10s %-24s %s\n' "WireGuard" \
+    "$(systemctl is-active "wg-quick@${WG_IF}" 2>/dev/null)" \
+    "udp ${WG_PORT}${WG_ALT_PORTS:+, ${WG_ALT_PORTS// /, }}" "fingerprintable"
+  if have_awg; then
+    printf '%-14s %-10s %-24s %s\n' "AmneziaWG" \
+      "$(systemctl is-active "awg-quick@${AWG_IF}" 2>/dev/null)" \
+      "udp ${AWG_PORT}${AWG_ALT_PORTS:+, ${AWG_ALT_PORTS// /, }}" "obfuscated"
+  else
+    printf '%-14s %s%-10s%s %s\n' "AmneziaWG" "$DIM" "absent" "$RST" "install-amnezia.sh"
+  fi
+  if have_reality; then
+    printf '%-14s %-10s %-24s %s\n' "REALITY" \
+      "$(systemctl is-active sing-box 2>/dev/null)" \
+      "tcp ${REALITY_PORT:-443}" "masks as ${REALITY_SNI}"
+  else
+    printf '%-14s %s%-10s%s %s\n' "REALITY" "$DIM" "absent" "$RST" "install-reality.sh"
+  fi
+  printf '\n%sDNS%s        %s\n' "$BOLD" "$RST" "$(systemctl is-active dnsmasq 2>/dev/null)"
+}
+
+case ${1:-} in
+  add)       shift; cmd_add "$@" ;;
+  qr)        shift; cmd_qr "$@" ;;
+  show)      shift; cmd_show "$@" ;;
+  list)      shift; cmd_list "$@" ;;
+  remove|rm) shift; cmd_remove "$@" ;;
+  endpoint)  shift; cmd_endpoint "$@" ;;
+  regen)     shift; cmd_regen "$@" ;;
+  status)    shift; cmd_status "$@" ;;
+  *)         sed -n '2,11p' "$0" | sed 's/^# \?//' ;;
+esac
