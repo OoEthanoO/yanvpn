@@ -25,8 +25,8 @@ STATE=/var/lib/yanvpn/state
 
 # Ports to probe per transport, best first. 443 is first because a firewall that
 # permits HTTP/3 sees UDP/443 and hesitates to drop it.
-WG_PORTS=${WG_PORTS:-"51820 443 53"}
-AWG_PORTS=${AWG_PORTS:-"443 53 51821"}
+WG_PORTS=${WG_PORTS:-"51820"}
+AWG_PORTS=${AWG_PORTS:-"443"}
 
 need_root() { [[ $EUID -eq 0 ]] || die "Run as root:  sudo yanvpn $*"; }
 
