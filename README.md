@@ -150,8 +150,23 @@ cellular hotspot. If that fails too, the problem is at home.
 
 **Testing from inside your own house usually fails, and that's normal.** Dialing
 your public IP from the same LAN the server is on requires the router to support
-hairpin NAT, and many don't. It looks exactly like a broken setup. To test at
-home, dial the server directly instead:
+hairpin NAT, and many don't — including, commonly, for UDP only. A router that
+hairpins TCP but not UDP will let REALITY through while every UDP transport
+fails, which looks exactly like a broken port forward.
+
+Distinguish the two with a control: send a probe to the server's **LAN** address
+and the same probe to your **public** address, and capture on the server.
+
+```bash
+sudo tcpdump -ni <wan-if> -l udp > /tmp/c.txt 2>&1 &
+echo -n test > /dev/udp/<server-lan-ip>/443     # control
+echo -n test > /dev/udp/<public-ip>/443         # through the forward
+```
+
+If the control arrives and the public one doesn't, it's hairpin, not your rules.
+UDP forwards then can only be confirmed from a phone on cellular.
+
+To test at home, dial the server directly instead:
 
 ```bash
 sudo yanvpn pin <server-LAN-ip>
