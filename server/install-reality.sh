@@ -6,13 +6,12 @@
 # Ordinary TLS tunnels are detectable because their certificate is either
 # self-signed or issued to a domain nobody else visits. REALITY sidesteps that:
 # during the handshake your server proxies the real TLS negotiation to a genuine
-# public site (Microsoft, Apple, ...), so the certificate a middlebox observes is
-# that site's actual certificate, with a valid chain. If a censor actively probes
-# your address, it is transparently handed the real site and sees nothing unusual.
+# public site, so the certificate a middlebox observes is that site's actual
+# certificate, with a valid chain. If a censor actively probes your address, it
+# is transparently handed the real site and sees nothing unusual.
 #
-# The result is indistinguishable from an HTTPS connection to a major website
-# without also blocking that website. Cost: TCP, so throughput is lower than
-# WireGuard, and head-of-line blocking hurts on lossy links.
+# Cost: TCP, so throughput is lower than WireGuard, and head-of-line blocking
+# hurts on lossy links.
 
 set -euo pipefail
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -25,34 +24,6 @@ load_config
 REALITY_PORT=${REALITY_PORT:-443}
 
 say "VLESS + REALITY install"
-
-# ------------------------------------------------------------------- the mask
-# The site we borrow. It must support TLS 1.3 and HTTP/2, must not be blocked on
-# the network you're bypassing, and should be somewhere plausible for you to
-# connect to constantly.
-CANDIDATES=${CANDIDATES:-"www.microsoft.com www.apple.com www.cloudflare.com dl.google.com"}
-
-check_dest() {
-  local host=$1
-  timeout 10 openssl s_client -connect "${host}:443" -servername "$host" \
-      -tls1_3 -alpn h2 </dev/null 2>/dev/null \
-    | grep -q 'ALPN protocol: h2'
-}
-
-if [[ -n ${REALITY_SNI:-} ]]; then
-  SNI=$REALITY_SNI
-  ok "Using configured mask site: $SNI"
-else
-  say "Choosing a mask site"
-  SNI=""
-  for c in $CANDIDATES; do
-    printf '  testing %-22s' "$c"
-    if check_dest "$c"; then printf '%sTLS1.3 + h2 ok%s\n' "$GRN" "$RST"; SNI=$c; break
-    else printf '%sunsuitable%s\n' "$YEL" "$RST"; fi
-  done
-  [[ -n $SNI ]] || die "No candidate site supports TLS1.3+h2 from here. Set REALITY_SNI=<host> and re-run."
-  ok "Masking as ${BOLD}${SNI}${RST}"
-fi
 
 # ------------------------------------------------------------------- sing-box
 say "Installing sing-box"
@@ -69,21 +40,102 @@ VER=${SINGBOX_VERSION:-$(curl -fsSL https://api.github.com/repos/SagerNet/sing-b
        | jq -r '.tag_name' | sed 's/^v//')}
 [[ -n $VER && $VER != null ]] || die "Could not determine the latest sing-box release. Set SINGBOX_VERSION=x.y.z."
 
-tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
-curl -fsSL -o "$tmp/sb.tgz" \
-  "https://github.com/SagerNet/sing-box/releases/download/v${VER}/sing-box-${VER}-linux-${ARCH}.tar.gz" \
-  || die "Download failed for sing-box ${VER} (${ARCH})."
-tar -xzf "$tmp/sb.tgz" -C "$tmp"
-install -m 755 "$tmp"/sing-box-*/sing-box /usr/local/bin/sing-box
+if ! command -v sing-box >/dev/null || [[ $(sing-box version | awk 'NR==1{print $3}') != "$VER" ]]; then
+  tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+  curl -fsSL -o "$tmp/sb.tgz" \
+    "https://github.com/SagerNet/sing-box/releases/download/v${VER}/sing-box-${VER}-linux-${ARCH}.tar.gz" \
+    || die "Download failed for sing-box ${VER} (${ARCH})."
+  tar -xzf "$tmp/sb.tgz" -C "$tmp"
+  install -m 755 "$tmp"/sing-box-*/sing-box /usr/local/bin/sing-box
+fi
 ok "sing-box $(sing-box version | awk 'NR==1{print $3}')"
+
+# ----------------------------------------------------------------- accurate time
+# REALITY performs a real TLS 1.3 handshake and embeds a timestamp; a skewed
+# clock breaks authentication in a way that looks exactly like censorship.
+if ! timedatectl show -p NTPSynchronized --value 2>/dev/null | grep -q yes; then
+  warn "System clock is not NTP-synchronised — enabling timesyncd"
+  timedatectl set-ntp true 2>/dev/null || apt-get install -y -qq systemd-timesyncd >/dev/null
+fi
 
 # --------------------------------------------------------------------- keys
 say "Generating REALITY keys"
-kp=$(sing-box generate reality-keypair)
-R_PRIV=$(awk -F': *' '/PrivateKey/{print $2}' <<<"$kp")
-R_PUB=$(awk -F': *' '/PublicKey/{print $2}' <<<"$kp")
-[[ -n $R_PRIV && -n $R_PUB ]] || die "Could not parse the REALITY keypair from sing-box."
-R_SID=$(openssl rand -hex 8)
+if [[ -n ${REALITY_PRIV:-} && -n ${REALITY_PUB:-} && -n ${REALITY_SID:-} ]]; then
+  R_PRIV=$REALITY_PRIV; R_PUB=$REALITY_PUB; R_SID=$REALITY_SID
+  ok "reusing existing keys (clients keep working)"
+else
+  kp=$(sing-box generate reality-keypair)
+  R_PRIV=$(awk -F': *' '/PrivateKey/{print $2}' <<<"$kp")
+  R_PUB=$(awk -F': *' '/PublicKey/{print $2}' <<<"$kp")
+  [[ -n $R_PRIV && -n $R_PUB ]] || die "Could not parse the REALITY keypair from sing-box."
+  R_SID=$(openssl rand -hex 8)
+  ok "public key $R_PUB"
+fi
+
+# ------------------------------------------------------------------- the mask
+# The site we borrow. TLS 1.3 + HTTP/2 support is necessary but NOT sufficient:
+# some major sites complete an ordinary TLS handshake yet cannot serve as a
+# REALITY handshake target at all (www.microsoft.com is one). The only test
+# worth trusting is a real REALITY handshake, so stand up a throwaway
+# server/client pair on loopback per candidate and require traffic to flow.
+CANDIDATES=${CANDIDATES:-"www.apple.com dl.google.com addons.mozilla.org www.cloudflare.com www.lovelive-anime.jp"}
+
+verify_mask_site() {
+  local host=$1 sport=45443 cport=11443 uuid rc=1 sp cp out
+  uuid=$(cat /proc/sys/kernel/random/uuid)
+  local sc; sc=$(mktemp); local cc; cc=$(mktemp)
+
+  jq -n --arg priv "$R_PRIV" --arg sid "$R_SID" --arg sni "$host" \
+        --arg uuid "$uuid" --argjson p "$sport" '
+  { log:{level:"error"},
+    inbounds:[{type:"vless",tag:"in",listen:"127.0.0.1",listen_port:$p,
+               users:[{uuid:$uuid,flow:"xtls-rprx-vision"}],
+               tls:{enabled:true,server_name:$sni,
+                    reality:{enabled:true,handshake:{server:$sni,server_port:443},
+                             private_key:$priv,short_id:[$sid]}}}],
+    outbounds:[{type:"direct",tag:"direct"}] }' >"$sc"
+
+  jq -n --arg uuid "$uuid" --arg pbk "$R_PUB" --arg sid "$R_SID" --arg sni "$host" \
+        --argjson sp "$sport" --argjson cp "$cport" '
+  { log:{level:"error"},
+    inbounds:[{type:"socks",tag:"in",listen:"127.0.0.1",listen_port:$cp}],
+    outbounds:[{type:"vless",tag:"proxy",server:"127.0.0.1",server_port:$sp,uuid:$uuid,
+                flow:"xtls-rprx-vision",
+                tls:{enabled:true,server_name:$sni,utls:{enabled:true,fingerprint:"chrome"},
+                     reality:{enabled:true,public_key:$pbk,short_id:$sid}}}] }' >"$cc"
+
+  sing-box run -c "$sc" >/dev/null 2>&1 & sp=$!
+  sing-box run -c "$cc" >/dev/null 2>&1 & cp=$!
+  sleep 3
+  out=$(curl -4 -s --max-time 8 --socks5-hostname "127.0.0.1:${cport}" https://api.ipify.org 2>/dev/null)
+  [[ -n $out ]] && rc=0
+  kill "$sp" "$cp" 2>/dev/null || true
+  wait "$sp" "$cp" 2>/dev/null || true
+  rm -f "$sc" "$cc"
+  return $rc
+}
+
+if [[ -n ${REALITY_SNI_FORCE:-} ]]; then
+  SNI=$REALITY_SNI_FORCE
+  ok "Using forced mask site: $SNI"
+else
+  say "Choosing a mask site"
+  info "testing each candidate with a real REALITY handshake, not just TLS"
+  SNI=""
+  for c in $CANDIDATES; do
+    printf '  %-24s' "$c"
+    if ! timeout 12 openssl s_client -connect "${c}:443" -servername "$c" \
+           -tls1_3 -alpn h2 </dev/null 2>/dev/null | grep -q 'ALPN protocol: h2'; then
+      printf '%sno TLS1.3+h2%s\n' "$YEL" "$RST"; continue
+    fi
+    if verify_mask_site "$c"; then
+      printf '%sREALITY handshake ok%s\n' "$GRN" "$RST"; SNI=$c; break
+    fi
+    printf '%sTLS fine, but REALITY fails%s\n' "$YEL" "$RST"
+  done
+  [[ -n $SNI ]] || die "No candidate works as a REALITY mask. Set REALITY_SNI_FORCE=<host> and re-run."
+  ok "Masking as ${BOLD}${SNI}${RST}"
+fi
 
 set_env REALITY_PRIV "$R_PRIV"
 set_env REALITY_PUB  "$R_PUB"
@@ -92,15 +144,6 @@ set_cfg REALITY_SNI  "$SNI"
 set_cfg REALITY_PORT "$REALITY_PORT"
 # Pin the client to the same build, so both ends agree on the config schema.
 set_cfg SINGBOX_VERSION "$VER"
-ok "public key $R_PUB"
-
-# ----------------------------------------------------------------- accurate time
-# REALITY performs a real TLS 1.3 handshake; a skewed clock breaks it in ways
-# that look exactly like censorship.
-if ! timedatectl show -p NTPSynchronized --value 2>/dev/null | grep -q yes; then
-  warn "System clock is not NTP-synchronised — enabling timesyncd"
-  timedatectl set-ntp true 2>/dev/null || apt-get install -y -qq systemd-timesyncd >/dev/null
-fi
 
 # ------------------------------------------------------------------- service
 cat >/etc/systemd/system/sing-box.service <<'EOF'
@@ -134,7 +177,7 @@ fi
 
 systemctl enable sing-box >/dev/null 2>&1
 systemctl restart sing-box
-sleep 1
+sleep 2
 systemctl is-active --quiet sing-box || {
   journalctl -u sing-box -n 30 --no-pager; die "sing-box failed to start."; }
 ok "sing-box running, enabled at boot"
@@ -153,7 +196,7 @@ separate rule from the UDP ones, and it is the step people forget.
 
 Then re-issue clients to pick up the REALITY profile:
 
-  sudo vpnctl add phone       # or: vpnctl qr phone reality
+  sudo vpnctl regen && sudo vpnctl qr phone reality
 
 ${BOLD}iOS:${RST} install ${BOLD}sing-box${RST}, ${BOLD}Streisand${RST}, or ${BOLD}V2Box${RST} (all free) and scan the
 reality QR code. The official WireGuard app cannot speak this protocol.

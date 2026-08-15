@@ -128,16 +128,18 @@ _try_wgfam() {
 # ----------------------------------------------------------------- REALITY try
 _try_reality() {
   systemctl start yanvpn-singbox >/dev/null 2>&1 || return 1
-  local i
-  for ((i = 0; i < 20; i++)); do
-    sleep 0.5
-    systemctl is-active --quiet yanvpn-singbox || return 1
+  # Bound by wall clock, not iteration count: when the tunnel is down each curl
+  # burns its full timeout, so "20 tries x 5s timeout" is 110 seconds, not 10.
+  local deadline=$(( SECONDS + 20 ))
+  while (( SECONDS < deadline )); do
+    systemctl is-active --quiet yanvpn-singbox || break
     # sing-box owns the default route once its tun is up, so a successful fetch
     # means traffic really is flowing through the tunnel.
-    if curl -4 -fsS --max-time 5 https://api.ipify.org >/dev/null 2>&1; then
+    if curl -4 -fsS --max-time 4 -o /dev/null https://api.ipify.org 2>/dev/null; then
       save_state reality ""
       return 0
     fi
+    sleep 1
   done
   systemctl stop yanvpn-singbox >/dev/null 2>&1
   return 1

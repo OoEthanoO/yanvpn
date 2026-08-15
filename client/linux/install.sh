@@ -89,11 +89,18 @@ if [[ -r $SRC/reality.env ]]; then
     case $variant in
       # 1.12+: typed DNS servers, rule actions, and a mandatory domain resolver.
       modern)
-        dns='{"servers":[{"tag":"remote","type":"udp","server":"1.1.1.1","detour":"proxy"},
-                         {"tag":"local","type":"udp","server":"1.1.1.1"}],
+        # remote resolver must be TCP: xtls-rprx-vision cannot relay UDP, so a
+        # udp server behind the proxy fails every query. "local" (type local)
+        # uses the system resolver to bootstrap, and avoids detouring to an
+        # empty direct outbound, which sing-box rejects at startup.
+        dns='{"servers":[{"tag":"remote","type":"tcp","server":"1.1.1.1","detour":"proxy"},
+                         {"tag":"local","type":"local"}],
               "final":"remote","strategy":"ipv4_only"}'
+        # QUIC is UDP, which Vision also cannot carry. Rejecting it makes
+        # browsers fall back to TCP immediately instead of stalling first.
         route='{"rules":[{"action":"sniff"},
                          {"protocol":"dns","action":"hijack-dns"},
+                         {"network":"udp","port":443,"action":"reject"},
                          {"ip_is_private":true,"outbound":"direct"}],
                 "final":"proxy","auto_detect_interface":true,
                 "default_domain_resolver":"local"}' ;;
