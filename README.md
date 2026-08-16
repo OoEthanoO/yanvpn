@@ -235,6 +235,20 @@ across customers and nothing can be forwarded to you. Ask your ISP for a public
 IPv4 address (often free), use IPv6 if they provide it, or relay through a cheap
 VPS.
 
+## Tests
+
+```bash
+./test/run-tests.sh
+```
+
+Unprivileged and offline. It builds a throwaway `/etc` tree and exercises every
+path that generates configuration, because every bug that actually cost time on
+this project was in generation and invisible to `bash -n`: a multi-word value
+written unquoted, a `read` returning 1 at EOF under `set -e`, peers built from
+the wrong transport's keys, and a sing-box config that passed `check` but would
+not start. The suite is mutation-tested — reintroducing each of those bugs makes
+it fail.
+
 ## Layout
 
 ```

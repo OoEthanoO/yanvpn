@@ -23,12 +23,10 @@ AWG_CONF=/etc/amnezia/amneziawg/${IF}.conf
 SB_CONF=/etc/sing-box/yanvpn.json
 STATE=/var/lib/yanvpn/state
 
-# Ports to probe per transport. Keep these matched to what the router actually
-# forwards: probing a port with nothing behind it costs 8s to learn nothing.
-# This deployment forwards only TCP/UDP 443, so AmneziaWG has one way in and
-# plain WireGuard is reachable on the LAN only. Widen if you add forwards.
-WG_PORTS=${WG_PORTS:-"51820"}
-AWG_PORTS=${AWG_PORTS:-"443"}
+# Optional site-local overrides, e.g. WG_PORTS="51820 53".
+CLIENT_CONF=/etc/yanvpn-client.conf
+# shellcheck source=/dev/null
+[[ -r $CLIENT_CONF ]] && source "$CLIENT_CONF"
 
 need_root() { [[ $EUID -eq 0 ]] || die "Run as root:  sudo yanvpn $*"; }
 
@@ -55,6 +53,22 @@ tool_for()      { [[ $1 == wg ]] && echo wg || echo awg; }
 quick_for()     { [[ $1 == wg ]] && echo wg-quick || echo awg-quick; }
 
 endpoint_host() { awk '/^\s*Endpoint/{split($3,a,":"); print a[1]; exit}' "$(conf_for "$1")"; }
+endpoint_port() { awk '/^\s*Endpoint/{split($3,a,":"); print a[2]; exit}' "$(conf_for "$1")"; }
+
+# Which UDP ports to probe for a transport.
+#
+# Default to exactly the port the server issued in the config. Extra candidates
+# are only useful if the router actually forwards them, and probing a port with
+# nothing behind it costs 8 seconds to learn nothing -- so widening this is a
+# deliberate, site-local choice made in /etc/yanvpn-client.conf, not a guess
+# baked into the tool.
+ports_for() {
+  local kind=$1 override
+  override=$([[ $kind == wg ]] && echo "${WG_PORTS:-}" || echo "${AWG_PORTS:-}")
+  if [[ -n $override ]]; then printf '%s' "$override"; return; fi
+  local p; p=$(endpoint_port "$kind")
+  printf '%s' "${p:-51820}"
+}
 srv_ip()        { awk '/^\s*DNS/{print $3; exit}' "$(conf_for "$1")"; }
 
 save_state() { install -d -m 700 /var/lib/yanvpn; printf 'LAST=%s\nLAST_PORT=%s\n' "$1" "${2:-}" >"$STATE"; }
@@ -100,7 +114,7 @@ _probe_port() {
 _try_wgfam() {
   local kind=$1 quiet=${2:-no} quick ports p first rc
   quick=$(quick_for "$kind")
-  ports=$([[ $kind == wg ]] && echo "$WG_PORTS" || echo "$AWG_PORTS")
+  ports=$(ports_for "$kind")
 
   # Lead with the port that worked last time.
   load_state
@@ -248,7 +262,7 @@ cmd_doctor() {
   if have_wg; then
     printf '\n%sWireGuard%s %s(plain — expected to fail on a network that fingerprints it)%s\n' \
       "$BOLD" "$RST" "$DIM" "$RST"
-    for p in $WG_PORTS; do
+    for p in $(ports_for wg); do
       printf '    UDP %-6s ' "$p"
       _probe_port wg "$p" 8; rc=$?
       case $rc in
@@ -266,7 +280,7 @@ cmd_doctor() {
   if have_awg; then
     printf '\n%sAmneziaWG%s %s(obfuscated — tells you whether UDP works at all)%s\n' \
       "$BOLD" "$RST" "$DIM" "$RST"
-    for p in $AWG_PORTS; do
+    for p in $(ports_for awg); do
       printf '    UDP %-6s ' "$p"
       _probe_port awg "$p" 8; rc=$?
       case $rc in

@@ -47,13 +47,25 @@ reaching your server. Work down the ladder:
 
 1. **WireGuard fails, AmneziaVPN works** → expected. That network fingerprints
    WireGuard. Use AmneziaVPN there and enable On-Demand for it.
-2. **AmneziaVPN also fails** → try changing its `Endpoint` port between `443`,
-   `53`, and `51821`. If none work, the network is dropping all UDP.
+
+   Note that plain WireGuard also fails everywhere if your router only forwards
+   443, which is the recommended minimal setup. In that case its profile works
+   at home and nowhere else, by design — consider deleting it from the phone so
+   you don't reach for it and assume something is broken.
+2. **AmneziaVPN also fails** → it can only use a port your router actually
+   forwards. With the recommended single TCP/UDP 443 rule there is nothing else
+   to try, so this means the network is dropping UDP. If you forwarded extra
+   ports, change the `Endpoint` port to one of them.
 3. **All UDP dead** → use the REALITY app. It's TCP/443 and looks like an
    ordinary HTTPS connection.
-4. **REALITY fails too** → check the server clock (`timedatectl` on the server).
-   REALITY performs a real TLS 1.3 handshake, and clock skew breaks it in a way
-   that looks exactly like censorship.
+4. **REALITY fails too** → check three things, in order:
+   - **The server clock.** `timedatectl` on the server. REALITY does a real
+     TLS 1.3 handshake and embeds a timestamp; skew breaks authentication in a
+     way indistinguishable from censorship.
+   - **TLS interception.** If every site on that network shows an unfamiliar
+     certificate authority, the network is MITMing all HTTPS and REALITY cannot
+     work there — it expects the mask site's genuine certificate.
+   - **DNS.** `dig +short @1.1.1.1 <your-ddns-name>` should match your home IP.
 
 If nothing works anywhere, test from cellular first. A failure there means the
 problem is at home — port forwards or a changed IP — not the network you're on.
