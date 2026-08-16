@@ -145,10 +145,18 @@ sudo vpnctl restore <file>       # rebuild a dead server from that backup
 
 ## Updating a running server
 
+Pull, then apply — in that order, and always with git:
+
 ```bash
-sudo ./server/update.sh -n     # what would change
-sudo ./server/update.sh        # install it, then regenerate
+ssh you@server 'cd ~/yanvpn && git pull'
+ssh you@server -t 'cd ~/yanvpn && sudo ./server/update.sh -n'   # what would change
+ssh you@server -t 'cd ~/yanvpn && sudo ./server/update.sh'      # do it
 ```
+
+Do **not** rsync a working tree over the server's checkout. Git will keep
+reporting the old commit while the files are something else, so `update.sh`
+can only tell you which commit it *thinks* it is installing. It warns when it
+detects this, but the fix is to not create the situation.
 
 Installs the management tooling and rebuilds every generated config from the
 client registry. Deliberately narrow: it does not install packages, mint keys,
