@@ -48,10 +48,32 @@ sync_file() {
   return 0
 }
 
-say "Updating yanvpn from $(cd "$SCRIPT_DIR/.." && pwd)"
-if command -v git >/dev/null && git -C "$SCRIPT_DIR/.." rev-parse --short HEAD >/dev/null 2>&1; then
-  info "checkout at $(git -C "$SCRIPT_DIR/.." rev-parse --short HEAD)$(
-        git -C "$SCRIPT_DIR/.." diff --quiet 2>/dev/null || echo ' (with local edits)')"
+REPO_DIR=$(cd "$SCRIPT_DIR/.." && pwd)
+say "Updating yanvpn from $REPO_DIR"
+
+# Report provenance honestly, and loudly when it is not trustworthy. A checkout
+# whose files do not match its recorded commit will install code that no commit
+# describes -- which is exactly what copying a working tree over a git checkout
+# produces, and it is far too easy to miss in passing.
+if command -v git >/dev/null && git -C "$REPO_DIR" rev-parse HEAD >/dev/null 2>&1; then
+  head_sha=$(git -C "$REPO_DIR" rev-parse --short HEAD)
+  dirty=$(git -C "$REPO_DIR" status --porcelain 2>/dev/null | wc -l)
+  if (( dirty )); then
+    warn "checkout says ${head_sha}, but ${dirty} file(s) differ from that commit"
+    info "the code about to be installed is not what ${head_sha} contains"
+    info "reconcile with:  git -C ${REPO_DIR} status"
+  else
+    info "checkout at ${head_sha}, clean"
+  fi
+  # Being behind the remote is worth knowing, but never fatal: this may be a
+  # deliberate rollback, and update.sh must not reach out to the network to
+  # decide whether to proceed.
+  if git -C "$REPO_DIR" rev-parse --verify --quiet origin/main >/dev/null 2>&1; then
+    behind=$(git -C "$REPO_DIR" rev-list --count "HEAD..origin/main" 2>/dev/null || echo 0)
+    (( behind )) && info "${behind} commit(s) behind the last-fetched origin/main"
+  fi
+else
+  info "not a git checkout — installing whatever is on disk"
 fi
 
 # ------------------------------------------------------------------ tooling
