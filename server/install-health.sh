@@ -5,7 +5,7 @@
 set -euo pipefail
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 
-BOLD=$'\e[1m'; RED=$'\e[31m'; GRN=$'\e[32m'; DIM=$'\e[2m'; RST=$'\e[0m'
+BOLD=$'\e[1m'; RED=$'\e[31m'; GRN=$'\e[32m'; RST=$'\e[0m'
 say() { printf '%s==>%s %s\n' "$BOLD" "$RST" "$*"; }
 ok()  { printf '  %s✓%s %s\n' "$GRN" "$RST" "$*"; }
 die() { printf '%s✗ %s%s\n' "$RED" "$*" "$RST" >&2; exit 1; }

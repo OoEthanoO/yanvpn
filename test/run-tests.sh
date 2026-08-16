@@ -103,6 +103,23 @@ for f in "$REPO"/server/*.sh "$REPO"/server/vpnctl "$REPO"/common/*.sh \
   succeeds "parses: ${f#"$REPO"/}" bash -n "$f"
 done
 
+# ------------------------------------------------------------------- shellcheck
+group "Lint"
+if command -v shellcheck >/dev/null; then
+  SC_FILES=("$REPO"/server/*.sh "$REPO"/server/vpnctl "$REPO"/common/*.sh
+            "$REPO"/client/linux/install.sh "$REPO"/client/linux/yanvpn "$REPO"/test/run-tests.sh)
+  errs=$(shellcheck -S error -f gcc "${SC_FILES[@]}" 2>/dev/null | grep -c ': error:')
+  eq "no shellcheck errors" "$errs" "0"
+  # Kept at zero. The few unavoidable cases carry explicit disable directives
+  # explaining why, so a new warning is a failure rather than something that
+  # blends quietly into a tolerated baseline.
+  warns=$(shellcheck -S warning -f gcc "${SC_FILES[@]}" 2>/dev/null | grep -c ': warning:')
+  if [[ $warns -le 0 ]]; then t_pass "shellcheck is clean"
+  else t_fail "shellcheck warnings not increasing" "$warns now, baseline 1"; fi
+else
+  t_skip "shellcheck" "not installed"
+fi
+
 # ------------------------------------------------------------ config round-trip
 group "Config values survive a write/read round-trip"
 # shellcheck source=/dev/null
@@ -250,6 +267,24 @@ eval "$(sed -n '/^ports_for()/,/^}/p' "$REPO/client/linux/yanvpn")"
 eq "wg port derived from its config"  "$(WG_PORTS='' ports_for wg)"  "51820"
 eq "awg port derived from its config" "$(AWG_PORTS='' ports_for awg)" "443"
 eq "site-local override wins" "$(WG_PORTS='1 2 3' ports_for wg)" "1 2 3"
+
+# ------------------------------------------------------- transport ordering
+group "Transport ordering"
+# A corrupted state file must never yield an empty or bogus order: cmd_up would
+# then match no case branch and report "nothing got through" without trying.
+# Both are read by transport_order, which is eval'd in below.
+# shellcheck disable=SC2034
+STATE=/nonexistent
+# shellcheck disable=SC2034
+load_state() { LAST=${FAKE_LAST:-}; }
+eval "$(sed -n '/^transport_order()/,/^}/p' "$REPO/client/linux/yanvpn")"
+eq "no state falls back to full order"   "$(FAKE_LAST=""        transport_order | tr '\n' ' ')" "wg awg reality "
+eq "known transport leads"               "$(FAKE_LAST="awg"     transport_order | tr '\n' ' ')" "awg wg reality "
+eq "reality leads when it worked last"   "$(FAKE_LAST="reality" transport_order | tr '\n' ' ')" "reality wg awg "
+eq "garbage state falls back safely"     "$(FAKE_LAST="GARBAGE" transport_order | tr '\n' ' ')" "wg awg reality "
+eq "multi-word garbage falls back too"   "$(FAKE_LAST="wg awg"  transport_order | tr '\n' ' ')" "wg awg reality "
+eq "explicit transport wins"             "$(transport_order awg | tr '\n' ' ')" "awg "
+unset -f load_state
 
 # --------------------------------------------------------------- health checks
 group "Health check"

@@ -197,7 +197,7 @@ cmd_show() {
 }
 
 cmd_list() {
-  local now n hs pub
+  local now n hs
   now=$(date +%s)
   printf '%s%-16s %-6s %-22s %s%s\n' "$BOLD" "NAME" "HOST" "WIREGUARD" "AMNEZIAWG" "$RST"
   for n in $(client_names); do
@@ -288,8 +288,9 @@ cmd_restore() {
     || die "$src does not look like a yanvpn backup."
 
   if [[ -d $YANVPN_DIR ]]; then
-    local aside="${YANVPN_DIR}.replaced-$(date +%s)"
-    mv "$YANVPN_DIR" "$aside"
+    local aside
+    aside="${YANVPN_DIR}.replaced-$(date +%s)"
+    mv "$YANVPN_DIR" "$aside" || die "Could not move existing state aside; refusing to restore over it."
     warn "Existing state moved aside to ${aside}"
   fi
   tar -C "$parent" -xzf "$src"

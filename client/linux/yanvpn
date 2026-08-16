@@ -25,7 +25,7 @@ STATE=/var/lib/yanvpn/state
 
 # Optional site-local overrides, e.g. WG_PORTS="51820 53".
 CLIENT_CONF=/etc/yanvpn-client.conf
-# shellcheck source=/dev/null
+# shellcheck disable=SC1090  # path is a constant, but only exists at runtime
 [[ -r $CLIENT_CONF ]] && source "$CLIENT_CONF"
 
 need_root() { [[ $EUID -eq 0 ]] || die "Run as root:  sudo yanvpn $*"; }
@@ -72,6 +72,7 @@ ports_for() {
 srv_ip()        { awk '/^\s*DNS/{print $3; exit}' "$(conf_for "$1")"; }
 
 save_state() { install -d -m 700 /var/lib/yanvpn; printf 'LAST=%s\nLAST_PORT=%s\n' "$1" "${2:-}" >"$STATE"; }
+# shellcheck disable=SC1090  # $STATE is a fixed path this script itself writes
 load_state() { [[ -r $STATE ]] && source "$STATE"; : "${LAST:=}" "${LAST_PORT:=}"; }
 
 public_ip() { curl -4 -fsS --max-time 8 https://api.ipify.org 2>/dev/null; }
@@ -118,7 +119,7 @@ _try_wgfam() {
 
   # Lead with the port that worked last time.
   load_state
-  if [[ $LAST == "$kind" && -n $LAST_PORT ]]; then
+  if [[ $LAST == "$kind" && ${LAST_PORT:-} =~ ^[0-9]+$ ]]; then
     first=$LAST_PORT
     ports="$first $(tr ' ' '\n' <<<"$ports" | grep -vx "$first" | tr '\n' ' ')"
   fi
@@ -172,25 +173,34 @@ _down_all() {
   return 0
 }
 
+# Order to try transports in: fastest first, but lead with whatever worked last
+# time. A stale or corrupted state file must never be able to produce an empty
+# or bogus order -- that would report "nothing got through" without having tried
+# anything, which is the most misleading failure this tool could produce.
+transport_order() {
+  local only=${1:-}
+  if [[ -n $only ]]; then printf '%s\n' "$only"; return 0; fi
+  load_state
+  if [[ ${LAST:-} =~ ^(wg|awg|reality)$ ]]; then
+    printf '%s\n' "$LAST"
+    printf '%s\n' wg awg reality | grep -vx "$LAST"
+  else
+    printf '%s\n' wg awg reality
+  fi
+}
+
 # --------------------------------------------------------------------- up/down
 cmd_up() {
   need_root up
   local only=${1:-}
   if anything_up; then ok "Already connected."; cmd_status; return 0; fi
 
-  # Fastest first. AmneziaWG costs a little throughput over plain WireGuard;
-  # REALITY costs considerably more, being TCP.
-  local order=(wg awg reality)
-  [[ -n $only ]] && order=("$only")
+  # Fastest first, except that whatever worked last time leads — that saves
+  # ~20s of probing on the network you actually use.
+  local order t
+  mapfile -t order < <(transport_order "$only")
 
-  # If a transport worked last time, lead with it — saves ~20s of probing on
-  # the network you actually use.
-  load_state
-  if [[ -z $only && -n $LAST ]]; then
-    order=("$LAST" $(printf '%s\n' wg awg reality | grep -vx "$LAST"))
-  fi
 
-  local t
   for t in "${order[@]}"; do
     case $t in
       wg)      have_wg      || continue; printf '%s==>%s WireGuard\n' "$BOLD" "$RST"

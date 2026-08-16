@@ -68,12 +68,16 @@ ensure_amneziawg() {
   command -v awg >/dev/null || die "amneziawg tools are still missing."
 
   # ---------------------------------------------------- kernel or userspace
+  # AWG_USERSPACE is this function's return channel: install-amnezia.sh reads it
+  # to report which implementation is in use. shellcheck cannot see across that.
+  # shellcheck disable=SC2034
   AWG_USERSPACE=no
   if modprobe amneziawg 2>/dev/null && lsmod | grep -q '^amneziawg'; then
     ok "kernel module loaded (fast path)"
   else
     command -v amneziawg-go >/dev/null || awg_build_from_source
     command -v amneziawg-go >/dev/null || die "No kernel module and no amneziawg-go."
+    # shellcheck disable=SC2034
     AWG_USERSPACE=yes
     warn "No kernel module for $(uname -r) — using userspace amneziawg-go"
     info "Costs throughput; obfuscation and correctness are unaffected."

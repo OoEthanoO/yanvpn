@@ -70,9 +70,15 @@ client_names() {
 load_client() {
   local name=$1
   [[ -r $CLIENTS/$name/meta ]] || return 1
-  CL_NAME= CL_HOST= CL_UUID=
-  CL_WG_PRIV= CL_WG_PUB= CL_WG_PSK=
-  CL_AWG_PRIV= CL_AWG_PUB= CL_AWG_PSK=
+  # Cleared one per line: "A= B= C=" on one line is valid but reads as an
+  # assignment of "B=" to A, and a stale value surviving here would silently
+  # leak one client's key into another's generated config.
+  local v
+  for v in CL_NAME CL_HOST CL_UUID \
+           CL_WG_PRIV CL_WG_PUB CL_WG_PSK \
+           CL_AWG_PRIV CL_AWG_PUB CL_AWG_PSK; do
+    unset "$v"
+  done
   # shellcheck source=/dev/null
   source "$CLIENTS/$name/meta"
   return 0
@@ -109,7 +115,7 @@ _fw_lines() {
 }
 
 _emit_fw() {
-  local kind=$1 port=$2 alts=$3
+  local port=$1 alts=$2
   _fw_lines up "$port" "$alts" | sed 's/^/PostUp   = /'
   _fw_lines down "$port" "$alts" | sed 's/^/PostDown = /'
 }
@@ -138,7 +144,7 @@ regen_wg() {
     echo "Address    = ${WG_NET4}.1/24"
     echo "ListenPort = ${WG_PORT}"
     echo "PrivateKey = ${WG_PRIV}"
-    _emit_fw wg "$WG_PORT" "$WG_ALT_PORTS"
+    _emit_fw "$WG_PORT" "$WG_ALT_PORTS"
     for n in $(client_names); do
       load_client "$n" || continue
       printf '\n[Peer]\n# yanvpn-client: %s\nPublicKey    = %s\nPresharedKey = %s\nAllowedIPs   = %s.%s/32\n' \
@@ -169,7 +175,7 @@ regen_awg() {
     echo "H2  = ${AWG_H2}"
     echo "H3  = ${AWG_H3}"
     echo "H4  = ${AWG_H4}"
-    _emit_fw awg "$AWG_PORT" "$AWG_ALT_PORTS"
+    _emit_fw "$AWG_PORT" "$AWG_ALT_PORTS"
     for n in $(client_names); do
       load_client "$n" || continue
       printf '\n[Peer]\n# yanvpn-client: %s\nPublicKey    = %s\nPresharedKey = %s\nAllowedIPs   = %s.%s/32\n' \
