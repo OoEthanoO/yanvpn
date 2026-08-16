@@ -143,6 +143,19 @@ sudo vpnctl backup               # save keys + registry before you need them
 sudo vpnctl restore <file>       # rebuild a dead server from that backup
 ```
 
+## Updating a running server
+
+```bash
+sudo ./server/update.sh -n     # what would change
+sudo ./server/update.sh        # install it, then regenerate
+```
+
+Installs the management tooling and rebuilds every generated config from the
+client registry. Deliberately narrow: it does not install packages, mint keys,
+or re-run the installers — that is one-time setup, and quietly re-running it is
+how a working deployment gets surprised. Clients are unaffected, because their
+keys live in `/etc/yanvpn` and all protocol configs are regenerated from them.
+
 ## Keeping it healthy
 
 ```bash
@@ -260,6 +273,7 @@ server/
   macbook-prep.sh     lid/sleep/Wi-Fi-powersave fixes for a laptop server
   health.sh           what runs every 5 minutes; verifies and self-heals
   install-health.sh   installs health.sh plus its timer
+  update.sh           apply this checkout to an already-running server
   install.sh          base: WireGuard, NAT, tunnel DNS
   install-amnezia.sh  AmneziaWG obfuscation
   install-reality.sh  VLESS + REALITY via sing-box
