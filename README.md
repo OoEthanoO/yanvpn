@@ -48,13 +48,17 @@ of the house, not the machine), but you still need preflight's LAN address.
 To the **server's** LAN address from step 1, and give that machine a **static
 DHCP lease** so it never moves:
 
-| Protocol | Ports | For |
+| Protocol | Port | For |
 | --- | --- | --- |
-| UDP | 51820 | WireGuard |
-| UDP | 443, 53 | AmneziaWG |
-| **TCP** | **443** | **REALITY** |
+| **TCP/UDP** | **443** | REALITY (TCP) and AmneziaWG (UDP) |
 
-That last row is a separate rule from the UDP ones and is the step people forget.
+One rule, one port, two protocols — that is the whole external footprint. If
+your router's form separates TCP and UDP, make it two rules; both are needed.
+
+You can also forward UDP 51820 (plain WireGuard) and UDP 53 (a fallback for
+captive portals), but neither is required, and an open port 53 attracts
+DNS-amplification scanners permanently. Start with 443 only and add the others
+only if `yanvpn doctor` shows you need them.
 
 ### 3. Install, on the server
 
@@ -135,7 +139,40 @@ sudo vpnctl qr phone awg         # reprint one transport's QR
 sudo vpnctl show laptop reality  # print the vless:// link
 sudo vpnctl status               # which transports are up
 sudo vpnctl regen                # rebuild every config from the registry
+sudo vpnctl backup               # save keys + registry before you need them
+sudo vpnctl restore <file>       # rebuild a dead server from that backup
 ```
+
+## Keeping it healthy
+
+```bash
+sudo ./server/install-health.sh
+```
+
+Installs a check that runs every 5 minutes and repairs what it finds. It exists
+because systemd's "active" does not mean "working" here: `wg-quick` and
+`awg-quick` are oneshots with `RemainAfterExit`, so a dead userspace
+`amneziawg-go` leaves the unit reporting active while the tunnel is gone. It
+verifies the interfaces really exist, that sing-box is really listening, that
+tunnel DNS answers a real query, and that the DDNS record still matches your
+public IP — re-pushing it if it has drifted.
+
+```bash
+sudo yanvpn-health -v      # run by hand
+sudo yanvpn-health -n      # check only, change nothing
+journalctl -t yanvpn-health --since today
+```
+
+## Back up before you need to
+
+```bash
+sudo vpnctl backup /root/yanvpn-backup.tar.gz
+```
+
+`/etc/yanvpn` holds the only irreplaceable state: server keys, the obfuscation
+profile, and every client's keys. Everything else is regenerated. Copy that file
+somewhere off the server — a backup that dies with the disk is not a backup.
+Restoring keeps existing clients working, so nobody re-scans a QR code.
 
 `/etc/yanvpn/clients/<name>/meta` is the single source of truth. Every protocol
 config is *regenerated* from it rather than edited in place, so adding a
@@ -207,6 +244,8 @@ server/
   lib.sh              shared state + config generation for all transports
   preflight.sh        reachability + CGNAT detection
   macbook-prep.sh     lid/sleep/Wi-Fi-powersave fixes for a laptop server
+  health.sh           what runs every 5 minutes; verifies and self-heals
+  install-health.sh   installs health.sh plus its timer
   install.sh          base: WireGuard, NAT, tunnel DNS
   install-amnezia.sh  AmneziaWG obfuscation
   install-reality.sh  VLESS + REALITY via sing-box

@@ -9,6 +9,8 @@
 #   vpnctl status                  server and transport status
 #   vpnctl endpoint <host>         change the address clients dial
 #   vpnctl regen                   rebuild all configs from the registry
+#   vpnctl backup [file]           save keys + client registry (disaster recovery)
+#   vpnctl restore <file>          restore from a backup, then rebuild
 
 set -euo pipefail
 LIB=${YANVPN_LIB:-/etc/yanvpn/lib.sh}
@@ -241,6 +243,54 @@ cmd_regen() {
   ok "Rebuilt every config from the registry."
 }
 
+cmd_backup() {
+  local out=${1:-/root/yanvpn-backup-$(date +%Y%m%d).tar.gz}
+  # /etc/yanvpn is the whole of the irreplaceable state: server private keys,
+  # the obfuscation profile, and every client's keys. Everything else --
+  # packages, unit files, generated wg0.conf -- is rebuilt by the installers
+  # plus 'vpnctl regen'.
+  ( umask 077; tar -C /etc -czf "$out" yanvpn )
+  chmod 600 "$out"
+  ok "Backup written to ${out} ($(du -h "$out" | cut -f1))"
+  cat <<EOF
+
+  ${BOLD}This file contains every private key.${RST} Treat it like one. Keep it off the
+  server itself -- a backup that dies with the disk is not a backup:
+
+      scp ${out} you@somewhere-else:
+
+  ${BOLD}To rebuild after a disk failure:${RST} install a fresh Ubuntu, run install.sh,
+  install-amnezia.sh and install-reality.sh, then:
+
+      sudo vpnctl restore <this file>
+
+  Existing clients keep working -- their keys are in here, so no re-issuing
+  and no re-scanning QR codes.
+
+EOF
+}
+
+cmd_restore() {
+  local src=${1:-}
+  [[ -n $src ]] || die "Usage: vpnctl restore <backup.tar.gz>"
+  [[ -r $src ]] || die "Cannot read $src"
+  tar -tzf "$src" | grep -q '^yanvpn/config$' \
+    || die "$src does not look like a yanvpn backup."
+
+  if [[ -d $YANVPN_DIR ]]; then
+    local aside="${YANVPN_DIR}.replaced-$(date +%s)"
+    mv "$YANVPN_DIR" "$aside"
+    warn "Existing state moved aside to ${aside}"
+  fi
+  tar -C /etc -xzf "$src"
+  chmod 700 "$YANVPN_DIR"
+
+  load_config
+  cmd_regen
+  ok "Restored $(client_names | wc -l) client(s) from ${src}."
+  info "Clients need no changes — their keys came back with them."
+}
+
 cmd_status() {
   printf '%sEndpoint%s   %s\n' "$BOLD" "$RST" "$ENDPOINT"
   printf '%sClients%s    %s\n\n' "$BOLD" "$RST" "$(client_names | wc -l)"
@@ -274,6 +324,8 @@ case ${1:-} in
   remove|rm) shift; cmd_remove "$@" ;;
   endpoint)  shift; cmd_endpoint "$@" ;;
   regen)     shift; cmd_regen "$@" ;;
+  backup)    shift; cmd_backup "$@" ;;
+  restore)   shift; cmd_restore "$@" ;;
   status)    shift; cmd_status "$@" ;;
-  *)         sed -n '2,11p' "$0" | sed 's/^# \?//' ;;
+  *)         sed -n '2,13p' "$0" | sed 's/^# \?//' ;;
 esac

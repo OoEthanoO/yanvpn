@@ -23,8 +23,10 @@ AWG_CONF=/etc/amnezia/amneziawg/${IF}.conf
 SB_CONF=/etc/sing-box/yanvpn.json
 STATE=/var/lib/yanvpn/state
 
-# Ports to probe per transport, best first. 443 is first because a firewall that
-# permits HTTP/3 sees UDP/443 and hesitates to drop it.
+# Ports to probe per transport. Keep these matched to what the router actually
+# forwards: probing a port with nothing behind it costs 8s to learn nothing.
+# This deployment forwards only TCP/UDP 443, so AmneziaWG has one way in and
+# plain WireGuard is reachable on the LAN only. Widen if you add forwards.
 WG_PORTS=${WG_PORTS:-"51820"}
 AWG_PORTS=${AWG_PORTS:-"443"}
 
