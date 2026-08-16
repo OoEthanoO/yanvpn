@@ -244,13 +244,21 @@ cmd_regen() {
 }
 
 cmd_backup() {
-  local out=${1:-/root/yanvpn-backup-$(date +%Y%m%d).tar.gz}
+  # Default somewhere the invoking user can actually retrieve. A backup sitting
+  # in /root that they cannot scp off the box is not a backup.
+  local home_default=/root
+  [[ -n ${SUDO_USER:-} ]] && home_default=$(getent passwd "$SUDO_USER" | cut -d: -f6)
+  local out=${1:-${home_default}/yanvpn-backup-$(date +%Y%m%d).tar.gz}
   # /etc/yanvpn is the whole of the irreplaceable state: server private keys,
   # the obfuscation profile, and every client's keys. Everything else --
   # packages, unit files, generated wg0.conf -- is rebuilt by the installers
   # plus 'vpnctl regen'.
-  ( umask 077; tar -C /etc -czf "$out" yanvpn )
+  local parent base
+  parent=$(dirname "$YANVPN_DIR"); base=$(basename "$YANVPN_DIR")
+  ( umask 077; tar -C "$parent" -czf "$out" "$base" )
   chmod 600 "$out"
+  # Hand it to the human who asked for it, so they can copy it off.
+  [[ -n ${SUDO_USER:-} ]] && chown "$SUDO_USER" "$out" 2>/dev/null || true
   ok "Backup written to ${out} ($(du -h "$out" | cut -f1))"
   cat <<EOF
 
@@ -274,7 +282,9 @@ cmd_restore() {
   local src=${1:-}
   [[ -n $src ]] || die "Usage: vpnctl restore <backup.tar.gz>"
   [[ -r $src ]] || die "Cannot read $src"
-  tar -tzf "$src" | grep -q '^yanvpn/config$' \
+  local parent base
+  parent=$(dirname "$YANVPN_DIR"); base=$(basename "$YANVPN_DIR")
+  tar -tzf "$src" | grep -qx "${base}/config" \
     || die "$src does not look like a yanvpn backup."
 
   if [[ -d $YANVPN_DIR ]]; then
@@ -282,7 +292,7 @@ cmd_restore() {
     mv "$YANVPN_DIR" "$aside"
     warn "Existing state moved aside to ${aside}"
   fi
-  tar -C /etc -xzf "$src"
+  tar -C "$parent" -xzf "$src"
   chmod 700 "$YANVPN_DIR"
 
   load_config
