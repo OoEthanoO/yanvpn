@@ -33,6 +33,10 @@ contains() { [[ $2 == *"$3"* ]] && t_pass "$1" || t_fail "$1" "missing '$3'"; }
 absent()   { [[ $2 != *"$3"* ]] && t_pass "$1" || t_fail "$1" "should not contain '$3'"; }
 succeeds() { if "${@:2}" >/dev/null 2>&1; then t_pass "$1"; else t_fail "$1" "command failed: ${*:2}"; fi; }
 fails()    { if "${@:2}" >/dev/null 2>&1; then t_fail "$1" "should have failed: ${*:2}"; else t_pass "$1"; fi; }
+# Run a command in a subshell. Anything under test that calls die() would
+# otherwise exit(1) the harness itself, ending the run mid-group -- which reads
+# as "the suite passed everything before this" rather than "the suite stopped".
+sub() { ( "$@" ); }
 
 # A throwaway /etc tree with one server and two clients.
 make_fixture() {
@@ -223,6 +227,37 @@ tar -C "$(dirname "$YANVPN_DIR")" -xzf "$BK"
 load_config; regen_wg
 contains "restored peer keeps its key" "$(cat "$WG_DIR/wg0.conf")" "alpha_WGPUB"
 eq "restored client count" "$(client_names | wc -l)" "2"
+
+# ------------------------------------------------------------- restore itself
+group "Restore"
+# cmd_backup was covered above, but cmd_restore had never actually been run --
+# only its tar mechanics by hand. A disaster-recovery path nobody has executed
+# is a hope, not a plan.
+make_fixture "$TMP/r"; enable_amnezia; enable_reality; load_config
+eval "$(sed -n '/^gen_wg_conf()/,/^}/p;/^gen_awg_conf()/,/^}/p;/^gen_reality_url()/,/^}/p;/^gen_reality_env()/,/^}/p;/^write_client_files()/,/^}/p;/^cmd_regen()/,/^}/p;/^cmd_backup()/,/^}/p;/^cmd_restore()/,/^}/p' "$REPO/server/vpnctl")"
+RBK="$TMP/restore.tar.gz"
+cmd_backup "$RBK" >/dev/null 2>&1
+
+# Refuses things that are not a yanvpn backup, rather than unpacking them over
+# live state.
+echo "not a backup" | gzip >"$TMP/bogus.tar.gz"
+fails "rejects a non-yanvpn archive" sub cmd_restore "$TMP/bogus.tar.gz"
+fails "rejects a missing file"       sub cmd_restore "$TMP/does-not-exist.tar.gz"
+fails "rejects no argument"          sub cmd_restore
+
+# A real restore over existing state.
+ORIG_UUID=$(grep -oP '(?<=^CL_UUID=).*' "$YANVPN_DIR/clients/alpha/meta")
+rm -rf "$YANVPN_DIR/clients/beta"          # simulate divergence from the backup
+if sub cmd_restore "$RBK" >/dev/null 2>&1; then t_pass "restore completes"
+else t_fail "restore completes"; fi
+eq "both clients came back"      "$(client_names | wc -l)" "2"
+eq "keys are the originals"      "$(grep -oP '(?<=^CL_UUID=).*' "$YANVPN_DIR/clients/alpha/meta")" "$ORIG_UUID"
+contains "peers regenerated from restored keys" "$(cat "$WG_DIR/wg0.conf")" "alpha_WGPUB"
+contains "awg peers regenerated too"            "$(cat "$AWG_DIR/awg0.conf")" "alpha_AWGPUB"
+# Displaced state is preserved rather than destroyed, so a mistaken restore is
+# recoverable.
+if compgen -G "${YANVPN_DIR}.replaced-*" >/dev/null; then t_pass "prior state moved aside, not deleted"
+else t_fail "prior state moved aside, not deleted"; fi
 
 # ------------------------------------------------------- sing-box client shapes
 group "sing-box client config shapes"

@@ -15,8 +15,8 @@ So yanvpn installs three transports and falls back between them:
 
 | Transport | Wire | How it hides | Cost |
 | --- | --- | --- | --- |
-| **WireGuard** | UDP 51820 | Nothing. Fastest. | Blocked wherever DPI looks. |
-| **AmneziaWG** | UDP 443 / 53 / 51821 | WireGuard fork: the four fixed header bytes become random per-deployment values, and junk packets pad the handshake so the size signature dies too. Same crypto, same speed. | Still UDP. Dies if all UDP is dropped. |
+| **WireGuard** | UDP 51820 | Nothing. Fastest. | Blocked wherever DPI looks; LAN-only unless you forward its port. |
+| **AmneziaWG** | UDP 443 | WireGuard fork: the four fixed header bytes become random per-deployment values, and junk packets pad the handshake so the size signature dies too. Same crypto, same speed. | Still UDP. Dies if all UDP is dropped. |
 | **VLESS + REALITY** | TCP 443 | Proxies the real TLS handshake to a genuine public site, so a middlebox sees that site's **real certificate** with a valid chain. Active probes get handed the real site. | TCP: lower throughput, head-of-line blocking on lossy links. |
 
 `yanvpn up` tries them fastest-first and remembers what worked.

@@ -145,10 +145,17 @@ case $CGNAT_VERDICT in
     ok "Looks good. You have a routable public IP."
     echo
     if [[ $NEEDS_FORWARD == yes ]]; then
-      info "Next: forward these ${BOLD}UDP${RST} ports on your router to ${BOLD}${LOCAL_IP}${RST}:"
-      info "    51820  (primary)"
-      info "      443  (disguises the tunnel as QUIC/HTTP3 — this is the one that beats firewalls)"
-      info "       53  (last-resort fallback; almost nothing blocks DNS ports)"
+      info "Next: forward ${BOLD}port 443, both TCP and UDP${RST}, to ${BOLD}${LOCAL_IP}${RST}."
+      info "  UDP 443 carries AmneziaWG — obfuscated, full speed."
+      info "  TCP 443 carries REALITY  — looks like ordinary HTTPS, works when UDP is blocked."
+      echo
+      info "One port, two protocols, and that is the whole external footprint."
+      info "If your router separates TCP and UDP, make it two rules; you need both."
+      echo
+      info "Optional, and not recommended to start with:"
+      info "  UDP 51820  plain WireGuard — fastest, but the one DPI reliably catches"
+      info "  UDP 53     a captive-portal fallback; also attracts DNS-amplification"
+      info "             scanners permanently, so add it only if you find you need it"
       echo
       info "Also give this machine a ${BOLD}static DHCP lease${RST} in the router so ${LOCAL_IP} never moves."
     fi
