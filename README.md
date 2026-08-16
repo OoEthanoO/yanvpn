@@ -39,9 +39,9 @@ cd ~/yanvpn && ./server/preflight.sh
 Run it on the server itself, not the laptop — the LAN address it reports is the
 one your router needs to forward to, and it differs per machine.
 
-A run from the client laptop reported public IP `203.0.113.1` and no CGNAT.
-If the server sits in the same house, that verdict carries over (it's a property
-of the house, not the machine), but you still need preflight's LAN address.
+If you already ran it from another machine in the same house, the CGNAT verdict
+carries over — that's a property of the house, not the machine — but you still
+need this machine's LAN address, which is what the router forwards to.
 
 ### 2. Forward ports on your router
 
