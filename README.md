@@ -132,6 +132,15 @@ sudo yanvpn down
 sudo yanvpn doctor    # run this on the network giving you trouble
 ```
 
+A timer runs `yanvpn reresolve` every two minutes. WireGuard resolves an
+endpoint hostname exactly once, when the peer is configured, so a server whose
+address rotates leaves a live tunnel sending to an address nobody answers on —
+the interface stays up, handshakes fail, and it reads as the network blocking
+you rather than as stale DNS. The timer no-ops unless a WireGuard-family tunnel
+is actually up, and never acts on a failed lookup, since re-pointing a peer on
+a DNS hiccup would break a tunnel that is currently fine. REALITY needs no
+equivalent: sing-box resolves per connection attempt and recovers on its own.
+
 `doctor` is the useful one. It probes each transport on each port and then
 interprets the result: whether they're fingerprinting WireGuard specifically,
 dropping all UDP, or the server is simply unreachable.

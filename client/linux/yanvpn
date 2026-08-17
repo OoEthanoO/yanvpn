@@ -6,6 +6,7 @@
 #   yanvpn status          what's connected and where traffic exits
 #   yanvpn doctor          probe every transport and port; say what this network blocks
 #   yanvpn pin <ip>        dial an IP directly, bypassing DNS
+#   yanvpn reresolve       re-point a live tunnel at the endpoint's new address
 #   yanvpn auto            connect at boot
 
 set -uo pipefail
@@ -187,6 +188,55 @@ transport_order() {
   else
     printf '%s\n' wg awg reality
   fi
+}
+
+# ------------------------------------------------------------------- reresolve
+# Decide whether a live peer needs re-pointing. Pure, so it can be tested.
+#   $1 endpoint host as written in the config
+#   $2 address the tunnel is currently sending to
+#   $3 address the hostname resolves to now
+# Returns 0 when the endpoint should be updated.
+needs_reresolve() {
+  local host=$1 current=$2 resolved=$3
+  # A literal IP has nothing to re-resolve.
+  [[ $host =~ ^[0-9]+(\.[0-9]+){3}$ ]] && return 1
+  # Missing either side means we cannot conclude anything; changing the endpoint
+  # on a failed lookup would break a tunnel that is currently fine.
+  [[ -z $resolved || -z $current ]] && return 1
+  [[ $current != "$resolved" ]]
+}
+
+# WireGuard resolves an endpoint hostname exactly once, when the peer is
+# configured. If the server's address changes afterwards -- which this setup has
+# already seen happen within an hour -- the client keeps sending to the old one
+# indefinitely. The interface stays up and the handshake keeps failing, so it
+# looks like the network is blocking you rather than like stale DNS.
+#
+# sing-box needs no equivalent: it resolves per connection attempt, so REALITY
+# recovers on its own.
+cmd_reresolve() {
+  need_root reresolve
+  load_state
+  local kind=${LAST:-}
+  [[ $kind =~ ^(wg|awg)$ ]] || return 0   # nothing WireGuard-ish is up
+
+  local tool host port peer current resolved
+  tool=$(tool_for "$kind")
+  "$tool" show "$IF" >/dev/null 2>&1 || return 0
+
+  host=$(endpoint_host "$kind"); port=$(endpoint_port "$kind")
+  peer=$("$tool" show "$IF" peers | head -1)
+  current=$("$tool" show "$IF" endpoints 2>/dev/null | awk '{print $2}' | sed 's/:[0-9]*$//' | tr -d '[]')
+  resolved=$(getent hosts "$host" | awk '{print $1; exit}')
+
+  if needs_reresolve "$host" "$current" "$resolved"; then
+    "$tool" set "$IF" peer "$peer" endpoint "${resolved}:${port}"
+    logger -t yanvpn "endpoint moved: ${host} ${current} -> ${resolved}; peer re-pointed"
+    ok "${host} moved ${current} -> ${resolved}; tunnel re-pointed"
+    return 0
+  fi
+  info "${host} still at ${resolved:-<unresolved>} — nothing to do"
+  return 0
 }
 
 # --------------------------------------------------------------------- up/down
@@ -383,7 +433,8 @@ case ${1:-status} in
   down|disconnect) shift; cmd_down "$@" ;;
   status)          shift; cmd_status "$@" ;;
   doctor)          shift; cmd_doctor "$@" ;;
+  reresolve)       shift; cmd_reresolve "$@" ;;
   pin)             shift; cmd_pin "$@" ;;
   auto)            shift; cmd_auto "$@" ;;
-  *)               sed -n '2,9p' "$0" | sed 's/^# \?//' ;;
+  *)               sed -n '2,11p' "$0" | sed 's/^# \?//' ;;
 esac

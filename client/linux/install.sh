@@ -216,10 +216,39 @@ EOF
   systemctl disable yanvpn-singbox >/dev/null 2>&1 || true
 fi
 
+# ---------------------------------------------------------------- reresolve
+# WireGuard resolves an endpoint hostname once and never again, so a server
+# whose address rotates leaves a live tunnel pointed at nothing. The timer
+# no-ops when no WireGuard-family tunnel is up, so it is cheap to leave on.
+cat >/etc/systemd/system/yanvpn-reresolve.service <<'EOF'
+[Unit]
+Description=Re-point a live yanvpn tunnel at its endpoint's current address
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/yanvpn reresolve
+EOF
+
+cat >/etc/systemd/system/yanvpn-reresolve.timer <<'EOF'
+[Unit]
+Description=Check every 2 minutes whether the yanvpn endpoint has moved
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=2min
+RandomizedDelaySec=15
+
+[Install]
+WantedBy=timers.target
+EOF
+
 # ------------------------------------------------------------------------ CLI
 install -m 755 "$SCRIPT_DIR/yanvpn" /usr/local/bin/yanvpn
 install -d -m 700 /var/lib/yanvpn
+systemctl daemon-reload
+systemctl enable --now yanvpn-reresolve.timer >/dev/null 2>&1 || true
 ok "CLI            /usr/local/bin/yanvpn"
+ok "reresolve      every 2 min, no-ops unless a tunnel is up"
 
 cat <<EOF
 

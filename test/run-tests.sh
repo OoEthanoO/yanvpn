@@ -321,6 +321,20 @@ eq "multi-word garbage falls back too"   "$(FAKE_LAST="wg awg"  transport_order 
 eq "explicit transport wins"             "$(transport_order awg | tr '\n' ' ')" "awg "
 unset -f load_state
 
+# ------------------------------------------------------ endpoint re-resolution
+group "Endpoint re-resolution"
+# WireGuard resolves an endpoint hostname once. If the server's address rotates
+# -- which this deployment saw happen within an hour -- a live tunnel keeps
+# sending to the dead one, and it reads as the network blocking you.
+eval "$(sed -n '/^needs_reresolve()/,/^}/p' "$REPO/client/linux/yanvpn")"
+succeeds "re-points when the address moved"   needs_reresolve vpn.example.org 1.2.3.4 5.6.7.8
+fails    "leaves an unchanged address alone"  needs_reresolve vpn.example.org 1.2.3.4 1.2.3.4
+fails    "skips a literal IPv4 endpoint"      needs_reresolve 203.0.113.9 203.0.113.9 203.0.113.9
+# Acting on a failed lookup would break a tunnel that is currently working.
+fails    "does nothing when resolution fails" needs_reresolve vpn.example.org 1.2.3.4 ""
+fails    "does nothing with no current peer"  needs_reresolve vpn.example.org "" 5.6.7.8
+fails    "skips a literal IP even if it moved" needs_reresolve 203.0.113.9 203.0.113.9 198.51.100.4
+
 # --------------------------------------------------------------- health checks
 group "Health check"
 HT="$TMP/health"; mkdir -p "$HT/etc/yanvpn"
