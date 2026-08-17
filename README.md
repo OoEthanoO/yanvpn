@@ -316,3 +316,12 @@ shim and a systemd unit that the packages would otherwise have provided.
 - Obfuscation hides *what protocol* you're speaking, not *that you're sending
   traffic*. A network operator can still see a steady encrypted flow to one
   address. Check the acceptable-use policy of whatever network you're on.
+
+## License
+
+[MIT](LICENSE). Use it, change it, ship it — just keep the notice.
+
+The software this orchestrates keeps its own licences: WireGuard and
+AmneziaWG are GPLv2, sing-box is GPLv3. yanvpn invokes them as separate
+programs rather than incorporating their code, so nothing here constrains
+what you do with these scripts.
