@@ -216,22 +216,29 @@ EOF
   systemctl disable yanvpn-singbox >/dev/null 2>&1 || true
 fi
 
-# ---------------------------------------------------------------- reresolve
-# WireGuard resolves an endpoint hostname once and never again, so a server
-# whose address rotates leaves a live tunnel pointed at nothing. The timer
-# no-ops when no WireGuard-family tunnel is up, so it is cheap to leave on.
-cat >/etc/systemd/system/yanvpn-reresolve.service <<'EOF'
+# -------------------------------------------------------------------- watch
+# Two things go wrong after a successful connect, and nothing used to notice
+# either: the server's address rotates (WireGuard resolves a hostname exactly
+# once), and the transport dies (failover only ran at 'yanvpn up' time, so a
+# dead tunnel stayed dead however long you sat there).
+#
+# The watcher no-ops unless you asked to be connected, so it is cheap to leave
+# enabled and will not resurrect a tunnel you deliberately took down.
+systemctl disable --now yanvpn-reresolve.timer >/dev/null 2>&1 || true
+rm -f /etc/systemd/system/yanvpn-reresolve.{service,timer}
+
+cat >/etc/systemd/system/yanvpn-watch.service <<'EOF'
 [Unit]
-Description=Re-point a live yanvpn tunnel at its endpoint's current address
+Description=Keep the yanvpn tunnel alive and pointed at the right address
 
 [Service]
 Type=oneshot
-ExecStart=/usr/local/bin/yanvpn reresolve
+ExecStart=/usr/local/bin/yanvpn watch
 EOF
 
-cat >/etc/systemd/system/yanvpn-reresolve.timer <<'EOF'
+cat >/etc/systemd/system/yanvpn-watch.timer <<'EOF'
 [Unit]
-Description=Check every 2 minutes whether the yanvpn endpoint has moved
+Description=Check the yanvpn tunnel every 2 minutes
 
 [Timer]
 OnBootSec=2min
@@ -246,9 +253,9 @@ EOF
 install -m 755 "$SCRIPT_DIR/yanvpn" /usr/local/bin/yanvpn
 install -d -m 700 /var/lib/yanvpn
 systemctl daemon-reload
-systemctl enable --now yanvpn-reresolve.timer >/dev/null 2>&1 || true
+systemctl enable --now yanvpn-watch.timer >/dev/null 2>&1 || true
 ok "CLI            /usr/local/bin/yanvpn"
-ok "reresolve      every 2 min, no-ops unless a tunnel is up"
+ok "watch          every 2 min: re-resolves, and fails over if the tunnel dies"
 
 cat <<EOF
 

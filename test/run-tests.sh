@@ -119,7 +119,7 @@ if command -v shellcheck >/dev/null; then
   # blends quietly into a tolerated baseline.
   warns=$(shellcheck -S warning -f gcc "${SC_FILES[@]}" 2>/dev/null | grep -c ': warning:')
   if [[ $warns -le 0 ]]; then t_pass "shellcheck is clean"
-  else t_fail "shellcheck warnings not increasing" "$warns now, baseline 1"; fi
+  else t_fail "shellcheck is clean" "$warns warning(s); this codebase keeps it at zero"; fi
 else
   t_skip "shellcheck" "not installed"
 fi
@@ -334,6 +334,41 @@ fails    "skips a literal IPv4 endpoint"      needs_reresolve 203.0.113.9 203.0.
 fails    "does nothing when resolution fails" needs_reresolve vpn.example.org 1.2.3.4 ""
 fails    "does nothing with no current peer"  needs_reresolve vpn.example.org "" 5.6.7.8
 fails    "skips a literal IP even if it moved" needs_reresolve 203.0.113.9 203.0.113.9 198.51.100.4
+
+# ------------------------------------------------------------- tunnel watchdog
+group "Tunnel watchdog"
+eval "$(sed -n '/^handshake_is_stale()/,/^}/p;/^should_reconnect()/,/^}/p' "$REPO/client/linux/yanvpn")"
+# Read by handshake_is_stale, which is eval'd in above.
+# shellcheck disable=SC2034
+HANDSHAKE_DEAD_AFTER=300
+NOW=1000000
+# PersistentKeepalive refreshes a working handshake every couple of minutes,
+# so anything older than five is dead rather than merely quiet.
+fails    "a fresh handshake is not stale"     handshake_is_stale $((NOW - 30))  "$NOW"
+fails    "two minutes old is still fine"      handshake_is_stale $((NOW - 120)) "$NOW"
+succeeds "ten minutes old is stale"           handshake_is_stale $((NOW - 600)) "$NOW"
+succeeds "never handshook counts as stale"    handshake_is_stale 0 "$NOW"
+succeeds "empty handshake counts as stale"    handshake_is_stale "" "$NOW"
+# Reconnecting on a single stale reading would tear down tunnels that are
+# simply waking up from suspend.
+fails    "one strike does not reconnect"      should_reconnect 1
+succeeds "two strikes reconnects"             should_reconnect 2
+succeeds "more strikes still reconnects"      should_reconnect 5
+
+# Intent is what stops a watchdog resurrecting a tunnel you took down.
+group "Connection intent"
+ST="$TMP/state"
+save_state() { printf 'LAST=%s\nLAST_PORT=%s\nWANTED=%s\n' "$1" "${2:-}" "${3:-yes}" >"$ST"; }
+# LAST/LAST_PORT mirror the real load_state; only WANTED is asserted on here.
+# shellcheck disable=SC2034,SC1090
+load_state() { LAST=; LAST_PORT=; WANTED=; [[ -r $ST ]] && source "$ST"; : "${WANTED:=no}"; }
+save_state awg 443
+load_state; eq "connecting records intent"  "$WANTED" "yes"
+save_state awg 443 no
+load_state; eq "disconnecting clears it"    "$WANTED" "no"
+rm -f "$ST"; load_state
+eq "absent state means not wanted"          "$WANTED" "no"
+unset -f save_state load_state
 
 # --------------------------------------------------------------- health checks
 group "Health check"

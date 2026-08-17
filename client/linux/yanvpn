@@ -7,6 +7,7 @@
 #   yanvpn doctor          probe every transport and port; say what this network blocks
 #   yanvpn pin <ip>        dial an IP directly, bypassing DNS
 #   yanvpn reresolve       re-point a live tunnel at the endpoint's new address
+#   yanvpn watch           check the tunnel is alive; fail over if it is not
 #   yanvpn auto            connect at boot
 
 set -uo pipefail
@@ -72,9 +73,19 @@ ports_for() {
 }
 srv_ip()        { awk '/^\s*DNS/{print $3; exit}' "$(conf_for "$1")"; }
 
-save_state() { install -d -m 700 /var/lib/yanvpn; printf 'LAST=%s\nLAST_PORT=%s\n' "$1" "${2:-}" >"$STATE"; }
+# WANTED records intent, not status: whether you asked to be connected. Without
+# it, anything that reconnects automatically would cheerfully resurrect a tunnel
+# you had just deliberately taken down.
+save_state() {
+  install -d -m 700 /var/lib/yanvpn
+  printf 'LAST=%s\nLAST_PORT=%s\nWANTED=%s\n' "$1" "${2:-}" "${3:-yes}" >"$STATE"
+}
+set_wanted() {
+  load_state
+  save_state "${LAST:-}" "${LAST_PORT:-}" "$1"
+}
 # shellcheck disable=SC1090  # $STATE is a fixed path this script itself writes
-load_state() { [[ -r $STATE ]] && source "$STATE"; : "${LAST:=}" "${LAST_PORT:=}"; }
+load_state() { [[ -r $STATE ]] && source "$STATE"; : "${LAST:=}" "${LAST_PORT:=}" "${WANTED:=no}"; }
 
 public_ip() { curl -4 -fsS --max-time 8 https://api.ipify.org 2>/dev/null; }
 
@@ -190,6 +201,26 @@ transport_order() {
   fi
 }
 
+# ----------------------------------------------------------------- monitoring
+# PersistentKeepalive=25 means a working WireGuard-family tunnel refreshes its
+# handshake every couple of minutes. Five minutes is the threshold: long enough
+# to ride out a suspend or a brief radio drop, short enough to fail over before
+# you have finished wondering why nothing loads.
+HANDSHAKE_DEAD_AFTER=${HANDSHAKE_DEAD_AFTER:-300}
+handshake_is_stale() {   # $1 = handshake epoch (0 or empty = never), $2 = now
+  local hs=${1:-0} now=$2
+  [[ -z $hs || $hs == 0 ]] && return 0
+  (( now - hs > HANDSHAKE_DEAD_AFTER ))
+}
+
+# Reconnect only after consecutive failures. A single stale reading at a
+# two-minute cadence is far more likely to be a laptop waking up than a dead
+# tunnel, and reconnecting on that would tear down a link about to recover.
+STRIKES=/var/lib/yanvpn/strikes
+should_reconnect() {     # $1 = strikes so far including this one
+  (( $1 >= 2 ))
+}
+
 # ------------------------------------------------------------------- reresolve
 # Decide whether a live peer needs re-pointing. Pure, so it can be tested.
 #   $1 endpoint host as written in the config
@@ -243,6 +274,9 @@ cmd_reresolve() {
 cmd_up() {
   need_root up
   local only=${1:-}
+  # Record the intent up front, not on success: if this attempt fails, the
+  # watcher should keep trying rather than concluding you wanted to be offline.
+  set_wanted yes
   if anything_up; then ok "Already connected."; cmd_status; return 0; fi
 
   # Fastest first, except that whatever worked last time leads — that saves
@@ -278,6 +312,8 @@ cmd_up() {
 
 cmd_down() {
   need_root down
+  set_wanted no          # stop the watcher resurrecting what you just took down
+  rm -f "$STRIKES" 2>/dev/null
   anything_up || { ok "Not connected."; return 0; }
   _down_all
   ok "Disconnected."
@@ -390,6 +426,63 @@ cmd_doctor() {
   return 0
 }
 
+# Run by the timer. Re-resolves a moved endpoint, then checks the tunnel is
+# actually carrying traffic, and falls back to another transport if it is not.
+# Failover otherwise happens only at 'yanvpn up' time, so a transport that dies
+# mid-session stays dead however long you sit there.
+cmd_watch() {
+  need_root watch
+  load_state
+  # Never act unless connecting was asked for. Intent, not status.
+  [[ ${WANTED:-no} == yes ]] || return 0
+
+  # One at a time: a reconnect takes longer than the timer interval.
+  exec 9>/var/lib/yanvpn/watch.lock
+  flock -n 9 || return 0
+
+  cmd_reresolve >/dev/null 2>&1
+
+  local kind=${LAST:-} now stale=no hs
+  now=$(date +%s)
+  case $kind in
+    wg|awg)
+      local tool; tool=$(tool_for "$kind")
+      if "$tool" show "$IF" >/dev/null 2>&1; then
+        hs=$("$tool" show "$IF" latest-handshakes 2>/dev/null | awk '{print $2; exit}')
+        handshake_is_stale "${hs:-0}" "$now" && stale=yes
+      else
+        stale=yes
+      fi ;;
+    reality)
+      sb_is_up || stale=yes
+      # sing-box can be running while the tunnel carries nothing, so ask for a
+      # byte rather than trusting the unit.
+      [[ $stale == no ]] && ! curl -4 -fsS --max-time 6 -o /dev/null \
+        https://api.ipify.org 2>/dev/null && stale=yes ;;
+    *) return 0 ;;
+  esac
+
+  local strikes=0
+  [[ -r $STRIKES ]] && strikes=$(cat "$STRIKES" 2>/dev/null || echo 0)
+  if [[ $stale == no ]]; then
+    [[ $strikes -gt 0 ]] && { echo 0 >"$STRIKES"; logger -t yanvpn "tunnel healthy again"; }
+    return 0
+  fi
+
+  strikes=$((strikes + 1)); echo "$strikes" >"$STRIKES"
+  logger -t yanvpn "transport ${kind} looks dead (strike ${strikes})"
+  should_reconnect "$strikes" || return 0
+
+  logger -t yanvpn "reconnecting: ${kind} has been dead for two checks"
+  echo 0 >"$STRIKES"
+  _down_all
+  # Clear the remembered transport so 'up' re-runs the whole fallback ladder
+  # rather than leading with the one that just failed.
+  save_state "" "" yes
+  cmd_up >/dev/null 2>&1 && logger -t yanvpn "reconnected via $(load_state; echo "${LAST:-none}")"
+  return 0
+}
+
 cmd_pin() {
   need_root pin
   local ip=${1:-}; [[ -n $ip ]] || die "Usage: yanvpn pin <ip-address>"
@@ -434,7 +527,8 @@ case ${1:-status} in
   status)          shift; cmd_status "$@" ;;
   doctor)          shift; cmd_doctor "$@" ;;
   reresolve)       shift; cmd_reresolve "$@" ;;
+  watch)           shift; cmd_watch "$@" ;;
   pin)             shift; cmd_pin "$@" ;;
   auto)            shift; cmd_auto "$@" ;;
-  *)               sed -n '2,11p' "$0" | sed 's/^# \?//' ;;
+  *)               sed -n '2,12p' "$0" | sed 's/^# \?//' ;;
 esac

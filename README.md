@@ -132,14 +132,26 @@ sudo yanvpn down
 sudo yanvpn doctor    # run this on the network giving you trouble
 ```
 
-A timer runs `yanvpn reresolve` every two minutes. WireGuard resolves an
-endpoint hostname exactly once, when the peer is configured, so a server whose
-address rotates leaves a live tunnel sending to an address nobody answers on —
-the interface stays up, handshakes fail, and it reads as the network blocking
-you rather than as stale DNS. The timer no-ops unless a WireGuard-family tunnel
-is actually up, and never acts on a failed lookup, since re-pointing a peer on
-a DNS hiccup would break a tunnel that is currently fine. REALITY needs no
-equivalent: sing-box resolves per connection attempt and recovers on its own.
+A timer runs `yanvpn watch` every two minutes, covering the two things that go
+wrong *after* a successful connect:
+
+**The server's address moves.** WireGuard resolves an endpoint hostname exactly
+once, when the peer is configured. A rotated IP leaves a live tunnel sending
+where nobody answers — the interface stays up, handshakes fail, and it reads as
+the network blocking you rather than as stale DNS. `watch` re-resolves and
+re-points the peer. It never acts on a failed lookup, since reacting to a DNS
+hiccup would break a tunnel that is currently fine.
+
+**The transport dies.** Failover otherwise runs only at `yanvpn up` time, so a
+tunnel that dies mid-session stays dead however long you sit there. `watch`
+treats a handshake older than five minutes as dead — long enough to ride out a
+suspend, short enough to act before you notice — and reconnects through the
+full fallback ladder after two consecutive failures rather than one, so waking
+from suspend does not tear down a link that is about to recover.
+
+It keys off intent, not status: `yanvpn down` records that you want to be
+offline, so nothing resurrects a tunnel you deliberately took down. REALITY
+needs no re-resolution of its own — sing-box resolves per connection attempt.
 
 `doctor` is the useful one. It probes each transport on each port and then
 interprets the result: whether they're fingerprinting WireGuard specifically,
