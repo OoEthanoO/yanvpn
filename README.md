@@ -239,25 +239,34 @@ Run `sudo yanvpn doctor` **on the failing network**, then read its verdict.
 Before blaming the firewall, prove the server works: connect from your phone's
 cellular hotspot. If that fails too, the problem is at home.
 
-**Testing from inside your own house usually fails, and that's normal.** Dialing
-your public IP from the same LAN the server is on requires the router to support
-hairpin NAT, and many don't — including, commonly, for UDP only. A router that
-hairpins TCP but not UDP will let REALITY through while every UDP transport
-fails, which looks exactly like a broken port forward.
+**Testing from inside your own house depends on hairpin NAT** — whether your
+router will route a packet addressed to your own public IP back to a machine on
+the same LAN. Support varies: some routers do it for TCP only, some for both,
+some not at all. The Nokia Beacon this was built against does both.
 
-Distinguish the two with a control: send a probe to the server's **LAN** address
-and the same probe to your **public** address, and capture on the server.
+**Beware how you test this.** Hairpin NAT normally rewrites the *source* address
+as well as the destination, usually to the router's own LAN address — otherwise
+the server would reply straight to the client, and the client would discard a
+reply arriving from an address it never contacted. So a packet capture filtered
+on the client's LAN address shows nothing arriving and looks like conclusive
+proof that hairpin is broken, while the traffic is in fact arriving from the
+router. This exact mistake was made here and believed for two days.
+
+Filter on the destination port and accept any source:
 
 ```bash
-sudo tcpdump -ni <wan-if> -l udp > /tmp/c.txt 2>&1 &
-echo -n test > /dev/udp/<server-lan-ip>/443     # control
-echo -n test > /dev/udp/<public-ip>/443         # through the forward
+sudo tcpdump -ni <wan-if> -l 'udp port 443'
 ```
 
-If the control arrives and the public one doesn't, it's hairpin, not your rules.
-UDP forwards then can only be confirmed from a phone on cellular.
+Better still, skip packet archaeology: bring a tunnel up and check whether it
+handshakes. `awg show yanvpn latest-handshakes` is unambiguous where a capture
+is easy to misread.
 
-To test at home, dial the server directly instead:
+Note also that from inside the house, "my exit IP is my home IP" proves nothing
+— that is the answer whether or not the tunnel is up. Check the interface and
+the handshake age instead.
+
+If hairpin genuinely doesn't work on your router, dial the server directly:
 
 ```bash
 sudo yanvpn pin <server-LAN-ip>
