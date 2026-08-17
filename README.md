@@ -85,8 +85,12 @@ alike to a classifier. It also hands UDP 443/53 over from WireGuard to
 AmneziaWG, since on any network where those ports mattered, the obfuscated
 transport is the one with a chance.
 
-`install-reality.sh` picks a mask site by testing candidates for TLS 1.3 + HTTP/2
-support, then generates keys and pins the client to the same sing-box build so
+`install-reality.sh` picks a mask site by standing up a throwaway REALITY
+server/client pair on loopback per candidate and requiring real traffic through
+it. TLS 1.3 + HTTP/2 support is necessary but not sufficient — `www.microsoft.com`
+passes that check and still cannot serve as a handshake target, which costs an
+afternoon to discover because a rejected client is transparently handed the real
+site's genuine certificate. It then pins the client to the same sing-box build so
 both ends agree on the config schema.
 
 ### 4. Create clients
@@ -103,9 +107,12 @@ code for each. iOS needs a different app per transport — see
 For the laptop, copy the whole directory:
 
 ```bash
-scp -r root@your-server:/etc/yanvpn/clients/laptop .
+ssh you@your-server 'sudo tar -C /etc/yanvpn/clients -czf - laptop' | tar -xzf -
 sudo ./client/linux/install.sh laptop/
 ```
+
+`/etc/yanvpn` is 0700, so a plain `scp` cannot read it and root SSH is usually
+disabled. Piping through `sudo tar` on the far side avoids both.
 
 ### 5. Pin down a stable address
 
@@ -187,8 +194,13 @@ journalctl -t yanvpn-health --since today
 ## Back up before you need to
 
 ```bash
-sudo vpnctl backup /root/yanvpn-backup.tar.gz
+sudo vpnctl backup
 ```
+
+It defaults to the home directory of whoever ran it, owned by them, so you can
+actually copy it off. Naming a path under `/root` produces a file your own user
+cannot read — which is how a backup ends up stranded on the disk it exists to
+protect.
 
 `/etc/yanvpn` holds the only irreplaceable state: server keys, the obfuscation
 profile, and every client's keys. Everything else is regenerated. Copy that file
