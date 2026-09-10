@@ -1,8 +1,8 @@
 # yanvpn
 
 A personal VPN: one always-on server in your house, an iOS phone and a Linux
-laptop as clients. Built for a network that filters DNS, firewalls outbound
-traffic, **and blocks WireGuard**.
+or Windows laptop as clients. The server can run Ubuntu or Windows. Built for
+a network that filters DNS, firewalls outbound traffic, **and blocks WireGuard**.
 
 ## Why WireGuard alone isn't enough
 
@@ -22,11 +22,77 @@ So yanvpn installs three transports and falls back between them:
 `yanvpn up` tries them fastest-first and remembers what worked.
 `yanvpn doctor` probes all of them and tells you what the network actually blocks.
 
-**DNS filtering** is solved separately and by construction: clients resolve via
-an address that exists only inside the tunnel, answered by `dnsmasq` at your
-house. The local resolver never sees a query.
+**DNS filtering** is solved separately and by construction. Linux-server clients
+resolve through tunnel-only `dnsmasq`; Windows-server clients send public DNS
+queries through the full tunnel. Either way, the local resolver never sees a
+query.
 
 ## Setup
+
+Choose the setup for the operating system on the home server. The original
+Linux instructions follow below; for a Windows-only setup, use this native path.
+
+### Native Windows server and Windows laptop (no WSL)
+
+Run all commands below in **PowerShell as Administrator**. On the Windows home
+server:
+
+```powershell
+cd C:\path\to\yanvpn
+.\server\windows\preflight.ps1
+.\server\windows\install.ps1 -Endpoint YOUR.PUBLIC.IP.OR.HOSTNAME
+& "$env:ProgramData\yanvpn\vpnctl.ps1" add phone
+& "$env:ProgramData\yanvpn\vpnctl.ps1" add laptop
+```
+
+The installer uses only native Windows components: the official WireGuard and
+AmneziaWG Windows services, Windows NAT/firewall rules, and the Windows sing-box
+binary under Task Scheduler. It does not install or use WSL. On Windows Home,
+where the WinNAT provider is absent, it uses built-in Internet Connection
+Sharing for AmneziaWG and disables plain WireGuard; AmneziaWG remains the fast
+transport and HTTPS remains the automatic fallback.
+
+If another Caddy-hosted HTTPS site already owns TCP 443, the installer detects
+it and adds a private VLESS-over-WebSocket route behind that site instead of
+displacing it. The existing site keeps its normal HTTPS behaviour and the VPN
+shares its valid certificate and port.
+
+In the router, reserve the server's LAN address and forward **UDP 443**, **TCP
+443**, and optionally **UDP 51820** to it. UDP 443 is AmneziaWG, TCP 443 is
+REALITY, and UDP 51820 is plain WireGuard.
+
+Copy `%ProgramData%\yanvpn\clients\laptop` from the server to this laptop, then
+on the laptop:
+
+```powershell
+cd C:\path\to\yanvpn
+.\client\windows\install.ps1 C:\path\to\copied\laptop
+yanvpn up
+yanvpn status
+```
+
+`yanvpn up` tries each transport enabled by the server, fastest first, and
+remembers that the VPN is wanted. A two-minute scheduled health check reconnects through the fallback
+ladder after two failed checks. `yanvpn down` records that the disconnect was
+intentional.
+
+For the iPhone, open the three `*-qr.png` files in
+`%ProgramData%\yanvpn\clients\phone` on the server and scan each with the app
+listed in [ios/README.md](ios/README.md). QR codes are rendered locally; their
+private keys are never sent to a web service.
+
+For a changing home IP, create a DuckDNS name and then run:
+
+```powershell
+.\server\windows\install-ddns.ps1 -Subdomain YOURNAME -Token YOUR_DUCKDNS_TOKEN
+& "$env:ProgramData\yanvpn\vpnctl.ps1" qr phone
+```
+
+Reinstall the laptop profile and rescan the phone profiles after changing the
+endpoint. The DuckDNS token and all VPN private keys are ACL-restricted under
+`%ProgramData%\yanvpn`.
+
+### Linux server
 
 ### 1. Check you're reachable — on the server
 
@@ -329,9 +395,11 @@ server/
   install-reality.sh  VLESS + REALITY via sing-box
   install-ddns.sh     DuckDNS on a systemd timer
   vpnctl              client management across all transports
+  windows/            native Windows server, client registry, NAT, and DDNS
 client/linux/
   install.sh          installs whichever transports the server offered
   yanvpn              connect / doctor / fallback
+client/windows/       native Windows installer and fallback CLI (no WSL)
 ios/README.md         which app per transport
 ```
 

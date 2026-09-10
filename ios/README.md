@@ -7,10 +7,10 @@ only plain WireGuard.
 | Transport | App | Cost | Use it when |
 | --- | --- | --- | --- |
 | WireGuard | **WireGuard** | free | Home, cellular, any permissive network. Fastest. |
-| AmneziaWG | **AmneziaVPN** | free | The network blocks WireGuard but allows UDP. |
+| AmneziaWG | **AmneziaWG** | free | The network blocks WireGuard but allows UDP. |
 | VLESS + REALITY | **sing-box**, **Streisand**, or **V2Box** | free | Everything else fails, or all UDP is blocked. |
 
-Install at least AmneziaVPN and one REALITY app before you go anywhere you
+Install at least AmneziaWG and one REALITY app before you go anywhere you
 expect trouble — you can't download them from behind the block.
 
 ## Setup
@@ -19,7 +19,7 @@ On the server, `sudo vpnctl add phone` prints a labelled QR code per transport.
 Scan each into its matching app:
 
 - **WireGuard** — tap **+** → *Create from QR code*
-- **AmneziaVPN** — tap **+** → *Scan QR code* (it reads the same config format
+- **AmneziaWG** — tap **+** → *Scan QR code* (it reads the same config format
   plus the obfuscation parameters)
 - **sing-box / Streisand / V2Box** — import from QR, or paste the `vless://`
   link from `sudo vpnctl show phone reality`
@@ -28,7 +28,7 @@ To reprint one later: `sudo vpnctl qr phone awg`.
 
 Verify each works by visiting a "what's my IP" site — it should show your home IP.
 
-## Turn on On-Demand (WireGuard and AmneziaVPN)
+## Turn on On-Demand (WireGuard and AmneziaWG)
 
 Without it you'll forget to connect on exactly the networks where you need it.
 
@@ -45,14 +45,14 @@ The phone then connects itself on any untrusted Wi-Fi and stays off at home.
 Each app shows a **last handshake** time. No handshake means packets aren't
 reaching your server. Work down the ladder:
 
-1. **WireGuard fails, AmneziaVPN works** → expected. That network fingerprints
-   WireGuard. Use AmneziaVPN there and enable On-Demand for it.
+1. **WireGuard fails, AmneziaWG works** → expected. That network fingerprints
+   WireGuard. Use AmneziaWG there and enable On-Demand for it.
 
    Note that plain WireGuard also fails everywhere if your router only forwards
    443, which is the recommended minimal setup. In that case its profile works
    at home and nowhere else, by design — consider deleting it from the phone so
    you don't reach for it and assume something is broken.
-2. **AmneziaVPN also fails** → it can only use a port your router actually
+2. **AmneziaWG also fails** → it can only use a port your router actually
    forwards. With the recommended single TCP/UDP 443 rule there is nothing else
    to try, so this means the network is dropping UDP. If you forwarded extra
    ports, change the `Endpoint` port to one of them.
@@ -77,5 +77,5 @@ problem is at home — port forwards or a changed IP — not the network you're 
   scrollback afterward.
 - `sudo vpnctl remove phone` revokes the device across all three transports
   immediately — do this if you lose it.
-- Running AmneziaVPN or a REALITY client costs a little more battery than plain
+- Running AmneziaWG or a REALITY client costs a little more battery than plain
   WireGuard. Keep plain WireGuard as your home/cellular profile.
