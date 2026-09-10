@@ -327,12 +327,12 @@ group "Endpoint re-resolution"
 # -- which this deployment saw happen within an hour -- a live tunnel keeps
 # sending to the dead one, and it reads as the network blocking you.
 eval "$(sed -n '/^needs_reresolve()/,/^}/p' "$REPO/client/linux/yanvpn")"
-succeeds "re-points when the address moved"   needs_reresolve vpn.example.org 1.2.3.4 5.6.7.8
-fails    "leaves an unchanged address alone"  needs_reresolve vpn.example.org 1.2.3.4 1.2.3.4
+succeeds "re-points when the address moved"   needs_reresolve vpn.example.org 198.51.100.7 203.0.113.8
+fails    "leaves an unchanged address alone"  needs_reresolve vpn.example.org 198.51.100.7 198.51.100.7
 fails    "skips a literal IPv4 endpoint"      needs_reresolve 203.0.113.9 203.0.113.9 203.0.113.9
 # Acting on a failed lookup would break a tunnel that is currently working.
-fails    "does nothing when resolution fails" needs_reresolve vpn.example.org 1.2.3.4 ""
-fails    "does nothing with no current peer"  needs_reresolve vpn.example.org "" 5.6.7.8
+fails    "does nothing when resolution fails" needs_reresolve vpn.example.org 198.51.100.7 ""
+fails    "does nothing with no current peer"  needs_reresolve vpn.example.org "" 203.0.113.8
 fails    "skips a literal IP even if it moved" needs_reresolve 203.0.113.9 203.0.113.9 198.51.100.4
 
 # ------------------------------------------------------------- tunnel watchdog
