@@ -92,6 +92,27 @@ Reinstall the laptop profile and rescan the phone profiles after changing the
 endpoint. The DuckDNS token and all VPN private keys are ACL-restricted under
 `%ProgramData%\yanvpn`.
 
+For an existing A record hosted by Vercel, use
+`server/windows/install-vercel-ddns.ps1` on the home server. It accepts a
+team-scoped token through standard input, encrypts it with Windows DPAPI, and
+restricts its directory to SYSTEM and Administrators. In an Administrator
+PowerShell terminal, provide your domain, subdomain, team slug, and the token's
+actual expiry date:
+
+```powershell
+$dnsToken = Read-Host 'Vercel token' -AsSecureString
+[Net.NetworkCredential]::new('', $dnsToken).Password |
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\server\windows\install-vercel-ddns.ps1 -Domain example.com -Subdomain vpn -TeamSlug your-team -TokenExpires 2027-09-15 -TokenFromStdin
+$dnsToken = $null
+```
+
+The `yanvpn-vercel-ddns` SYSTEM task checks every five minutes and after boot.
+It requires two public-IP services to agree and updates only the value of the
+existing, pinned A record. It does not create or delete DNS records. Client
+profiles continue using the same hostname. Renew the token before expiry by
+running the installer again with its replacement. Check the task's last result
+and `%ProgramData%\yanvpn\ddns\vercel-ddns-status.json` for update status.
+
 ### Linux server
 
 ### 1. Check you're reachable — on the server

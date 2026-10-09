@@ -17,6 +17,7 @@ $singBox = Join-Path $root 'bin\sing-box.exe'
 $wgName = 'yanvpn-wg'
 $awgName = 'yanvpn-awg'
 $realityTask = 'yanvpn-reality-client'
+$watchTask = 'yanvpn-watch'
 $transportsPath = Join-Path $root 'transports.json'
 
 function Assert-Administrator {
@@ -55,6 +56,16 @@ function Stop-All {
     Remove-Tunnel $awgExe 'awg' 'AmneziaWGTunnel'
     if (Get-ScheduledTask -TaskName $realityTask -ErrorAction SilentlyContinue) {
         Stop-ScheduledTask -TaskName $realityTask -ErrorAction SilentlyContinue
+    }
+}
+
+function Set-WatchEnabled([bool] $Enabled) {
+    $task = Get-ScheduledTask -TaskName $watchTask -ErrorAction SilentlyContinue
+    if (-not $task) { return }
+    if ($Enabled) {
+        Enable-ScheduledTask -TaskName $watchTask -ErrorAction SilentlyContinue | Out-Null
+    } else {
+        Disable-ScheduledTask -TaskName $watchTask -ErrorAction SilentlyContinue | Out-Null
     }
 }
 
@@ -124,7 +135,11 @@ function Get-ActiveTransport {
 }
 
 function Connect-YanVpn([string] $OnlyTransport) {
-    Write-State $true '' 0
+    # A failed connection must never arm the watchdog.  This matters most for
+    # full-tunnel transports: retrying one in the background can repeatedly
+    # remove the user's working route before yanvpn has proved it works.
+    Set-WatchEnabled $false
+    Write-State $false '' 0
     Stop-All
     $enabled = if (Test-Path -LiteralPath $transportsPath) {
         Get-Content -Raw -LiteralPath $transportsPath | ConvertFrom-Json
@@ -145,13 +160,16 @@ function Connect-YanVpn([string] $OnlyTransport) {
         $ok = if ($kind -eq 'reality') { Start-Reality } else { Start-WireFamily $kind }
         if ($ok) {
             Write-State $true $kind 0
+            Set-WatchEnabled $true
             Write-Host "Connected through $kind." -ForegroundColor Green
             return $true
         }
     }
     Stop-All
     Write-State $false '' 0
-    Write-Warning 'No transport connected. Run: yanvpn doctor'
+    Set-WatchEnabled $false
+    $doctorHint = if ($OnlyTransport) { "yanvpn doctor $OnlyTransport" } else { 'yanvpn doctor' }
+    Write-Warning "No transport connected. Run: $doctorHint"
     return $false
 }
 
@@ -160,6 +178,7 @@ Assert-Administrator
 switch ($Command) {
     'up' { if (-not (Connect-YanVpn $Only)) { exit 1 } }
     'down' {
+        Set-WatchEnabled $false
         Stop-All
         Write-State $false '' 0
         Write-Host 'Disconnected.' -ForegroundColor Green
@@ -175,15 +194,17 @@ switch ($Command) {
     }
     'doctor' {
         $wasWanted = (Read-State).Wanted
+        Set-WatchEnabled $false
         Stop-All
-        $results = foreach ($kind in 'wg','awg','reality') {
+        $probeOrder = if ($Only) { @($Only) } else { @('wg','awg','reality') }
+        $results = foreach ($kind in $probeOrder) {
             Write-Host "Probing $kind..." -ForegroundColor Cyan
             $ok = if ($kind -eq 'reality') { Start-Reality } else { Start-WireFamily $kind }
             [pscustomobject]@{ Transport = $kind; Result = if ($ok) { 'working' } else { 'blocked/unreachable' } }
             Stop-All
         }
         $results | Format-Table -AutoSize
-        if ($wasWanted) { [void] (Connect-YanVpn '') } else { Write-State $false '' 0 }
+        if ($wasWanted) { [void] (Connect-YanVpn '') } else { Write-State $false '' 0; Set-WatchEnabled $false }
     }
     'watch' {
         $state = Read-State

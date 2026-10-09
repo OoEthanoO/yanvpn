@@ -71,6 +71,11 @@ if ($LASTEXITCODE -ne 0) { throw "Could not secure $root" }
 
 Install-WireGuard
 Install-AmneziaWG
+# The laptop's AmneziaWG manager must stay off at Windows startup, including
+# after repairs. Tunnel services can still be managed by an explicit command.
+if (Get-Service -Name 'AmneziaWGManager' -ErrorAction SilentlyContinue) {
+    Set-Service -Name 'AmneziaWGManager' -StartupType Disabled
+}
 $version = (Get-Content -Raw -LiteralPath (Join-Path $ClientDirectory 'sing-box-version.txt')).Trim()
 Install-SingBox $version $bin
 
@@ -89,7 +94,7 @@ if (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue) {
     Unregister-ScheduledTask -TaskName $taskName -Confirm:$false
 }
 $action = New-ScheduledTaskAction -Execute $singBox -Argument "run -c `"$(Join-Path $root 'reality.json')`""
-$settings = New-ScheduledTaskSettingsSet -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero)
+$settings = New-ScheduledTaskSettingsSet -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
 Register-ScheduledTask -TaskName $taskName -Action $action -Settings $settings -User 'SYSTEM' -RunLevel Highest -ErrorAction Stop | Out-Null
 
 $watchName = 'yanvpn-watch'
@@ -98,8 +103,12 @@ if (Get-ScheduledTask -TaskName $watchName -ErrorAction SilentlyContinue) {
 }
 $watchAction = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$(Join-Path $root 'yanvpn.ps1')`" watch"
 $watchTrigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes 2)
-$watchSettings = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 1)
+$watchSettings = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 1) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
 Register-ScheduledTask -TaskName $watchName -Action $watchAction -Trigger $watchTrigger -Settings $watchSettings -User 'SYSTEM' -RunLevel Highest | Out-Null
+# The watchdog is armed only after a transport has connected successfully.
+# Keeping a fresh/repaired install disabled prevents any background tunnel
+# attempt before the user explicitly runs `yanvpn up`.
+Disable-ScheduledTask -TaskName $watchName | Out-Null
 
 $cmdDir = Join-Path $env:ProgramFiles 'yanvpn'
 New-Item -ItemType Directory -Force -Path $cmdDir | Out-Null
