@@ -244,6 +244,9 @@ if ($FallbackMode -eq 'Dual') {
 } elseif ($FallbackMode -eq 'CaddyWebSocket') { Write-Host '  HTTPS:      VLESS WebSocket through Caddy TCP 443' }
 else { Write-Host '  REALITY:    TCP 443' }
 Write-Host ''
+# Spelled out with -ExecutionPolicy Bypass: if this installer was itself started
+# that way, the user's window still refuses scripts, and a bare `& vpnctl.ps1`
+# fails there with "running scripts is disabled on this system".
 Write-Host "Create the clients next:"
-Write-Host "  & '$vpnctlTarget' add phone"
-Write-Host "  & '$vpnctlTarget' add laptop"
+Write-Host "  powershell -NoProfile -ExecutionPolicy Bypass -File '$vpnctlTarget' add phone"
+Write-Host "  powershell -NoProfile -ExecutionPolicy Bypass -File '$vpnctlTarget' add laptop"

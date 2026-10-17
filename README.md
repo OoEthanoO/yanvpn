@@ -34,11 +34,14 @@ Linux instructions follow below; for a Windows-only setup, use this native path.
 
 ### Native Windows server and Windows laptop (no WSL)
 
-Run all commands below in **PowerShell as Administrator**. On the Windows home
-server:
+Run all commands below in **PowerShell as Administrator**. Windows refuses to run
+scripts by default, so each block starts by allowing them for that window only:
+`-Scope Process` changes nothing that outlives it, which is also why a new
+window needs the line again. On the Windows home server:
 
 ```powershell
 cd C:\path\to\yanvpn
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
 .\server\windows\preflight.ps1
 .\server\windows\install.ps1 -Endpoint YOUR.PUBLIC.IP.OR.HOSTNAME
 & "$env:ProgramData\yanvpn\vpnctl.ps1" add phone
@@ -66,6 +69,7 @@ on the laptop:
 
 ```powershell
 cd C:\path\to\yanvpn
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
 .\client\windows\install.ps1 C:\path\to\copied\laptop
 yanvpn up
 yanvpn status
@@ -84,6 +88,8 @@ private keys are never sent to a web service.
 For a changing home IP, create a DuckDNS name and then run:
 
 ```powershell
+cd C:\path\to\yanvpn
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
 .\server\windows\install-ddns.ps1 -Subdomain YOURNAME -Token YOUR_DUCKDNS_TOKEN
 & "$env:ProgramData\yanvpn\vpnctl.ps1" qr phone
 ```
