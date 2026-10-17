@@ -32,9 +32,15 @@ CLIENT_CONF=/etc/yanvpn-client.conf
 
 need_root() { [[ $EUID -eq 0 ]] || die "Run as root:  sudo yanvpn $*"; }
 
-have_wg()      { [[ -r $WG_CONF ]]; }
-have_awg()     { [[ -r $AWG_CONF ]] && command -v awg-quick >/dev/null; }
-have_reality() { [[ -r $SB_CONF ]] && command -v sing-box >/dev/null; }
+# Which transports may be used. install.sh --reality-only sets TRANSPORTS to
+# "reality"; unset means every transport that has a config.
+enabled()      { [[ " ${TRANSPORTS:-wg awg reality} " == *" $1 "* ]]; }
+
+have_wg()      { enabled wg && [[ -r $WG_CONF ]]; }
+have_awg()     { enabled awg && [[ -r $AWG_CONF ]] && command -v awg-quick >/dev/null; }
+have_reality() { enabled reality && [[ -r $SB_CONF ]] && command -v sing-box >/dev/null; }
+# A Windows server in Dual mode puts REALITY on 8443, so never assume 443.
+reality_port() { jq -r '.outbounds[] | select(.tag=="proxy") | .server_port' "$SB_CONF" 2>/dev/null || echo 443; }
 
 wg_is_up()      { ip link show "$IF" >/dev/null 2>&1 && [[ -r $WG_CONF ]] && wg show "$IF" >/dev/null 2>&1; }
 awg_is_up()     { command -v awg >/dev/null && awg show "$IF" >/dev/null 2>&1; }
@@ -291,7 +297,7 @@ cmd_up() {
                _try_wgfam wg      && { echo; ok "Connected over WireGuard."; cmd_status; return 0; } ;;
       awg)     have_awg     || continue; printf '%s==>%s AmneziaWG (obfuscated)\n' "$BOLD" "$RST"
                _try_wgfam awg     && { echo; ok "Connected over AmneziaWG."; cmd_status; return 0; } ;;
-      reality) have_reality || continue; printf '%s==>%s VLESS + REALITY (TCP 443)\n' "$BOLD" "$RST"
+      reality) have_reality || continue; printf '%s==>%s VLESS + REALITY (TCP %s)\n' "$BOLD" "$RST" "$(reality_port)"
                printf '    connecting  '
                if _try_reality; then printf '%s✓%s\n\n' "$GRN" "$RST"
                  ok "Connected over REALITY."; cmd_status; return 0
@@ -303,7 +309,7 @@ cmd_up() {
   echo; bad "No transport got through."
   info "Run 'yanvpn doctor' for detail. Most likely one of:"
   info "  · the server is down, or its public IP moved (set up DDNS)"
-  info "  · router port forwards missing — REALITY needs TCP 443 forwarded, separately"
+  info "  · router port forwards missing — REALITY needs TCP $(reality_port) forwarded, separately"
   info "    from the UDP rules"
   info "  · this network blocks everything except proxied HTTP, in which case"
   info "    nothing short of a corporate-proxy-aware transport will work"
@@ -391,8 +397,8 @@ cmd_doctor() {
   fi
 
   if have_reality; then
-    printf '\n%sVLESS + REALITY%s %s(TCP 443, masked as HTTPS)%s\n' "$BOLD" "$RST" "$DIM" "$RST"
-    printf '    TCP 443    '
+    printf '\n%sVLESS + REALITY%s %s(TCP %s, masked as HTTPS)%s\n' "$BOLD" "$RST" "$DIM" "$(reality_port)" "$RST"
+    printf '    TCP %-6s ' "$(reality_port)"
     if _try_reality; then printf '%sopen%s\n' "$GRN" "$RST"; rt_ok=yes
       systemctl stop yanvpn-singbox >/dev/null 2>&1
     else
@@ -404,13 +410,23 @@ cmd_doctor() {
 
   # ------------------------------------------------------------- interpretation
   printf '\n%s==>%s What this means\n\n' "$BOLD" "$RST"
-  if [[ -n $wg_ok ]]; then
+  # With no UDP transport probed there is nothing to compare against, and the
+  # verdicts below would misread REALITY's result as "all UDP is blocked".
+  if ! have_wg && ! have_awg && [[ $rt_ok == yes ]]; then
+    ok "REALITY gets through on this network."
+  elif ! have_wg && ! have_awg; then
+    bad "REALITY did not get through."
+    info "Before blaming this network, prove the server is alive: connect from a"
+    info "phone hotspot. If that fails too, the problem is at home — the TCP $(reality_port)"
+    info "port forward, a changed IP, or the server's clock: REALITY does a real TLS 1.3"
+    info "handshake, and clock skew breaks it in a way that looks like censorship."
+  elif [[ -n $wg_ok ]]; then
     ok "Plain WireGuard works here (${wg_ok%% *}). This network isn't fingerprinting after all."
   elif [[ -n $awg_ok ]]; then
     ok "UDP is fine, but plain WireGuard is blocked — so they are matching its"
     info "  signature, exactly as expected. AmneziaWG on UDP ${awg_ok%% *} is your fast path."
   elif [[ $rt_ok == yes ]]; then
-    ok "All UDP is blocked; only TCP/443 survives. REALITY is your only option here,"
+    ok "All UDP is blocked; only TCP/$(reality_port) survives. REALITY is your only option here,"
     info "  and it is working. Expect lower throughput than WireGuard — that's the tax."
   elif [[ $wg_failed == yes && $awg_failed == yes ]]; then
     bad "No transport could even create its interface — this is a local setup"

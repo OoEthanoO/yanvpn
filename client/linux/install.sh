@@ -8,7 +8,12 @@
 #   scp -r root@your-server:/etc/yanvpn/clients/laptop .
 #   sudo ./client/linux/install.sh laptop/
 #
-# Installs whichever transports the server offered.
+# Installs whichever transports the server offered. For REALITY alone:
+#
+#   sudo ./install.sh --reality-only            # paste the vless:// link when asked
+#   sudo ./install.sh --reality-only laptop/    # or take it from a client directory
+#
+# The link is what 'vpnctl show laptop reality' prints on either server.
 
 set -euo pipefail
 
@@ -19,33 +24,145 @@ warn() { printf '  %s!%s %s\n' "$YEL" "$RST" "$*"; }
 info() { printf '  %s·%s %s\n' "$DIM" "$RST" "$*"; }
 die()  { printf '%s✗ %s%s\n' "$RED" "$*" "$RST" >&2; exit 1; }
 
+# ------------------------------------------------------------ REALITY profile
+# Every R_* value lands in the sing-box config or a download URL, so each is
+# held to what a yanvpn server actually produces.
+REALITY_ERR=""
+reality_ok() {
+  local hex='[0-9A-Fa-f]'
+  REALITY_ERR=""
+  if ! [[ ${R_UUID:-} =~ ^$hex{8}(-$hex{4}){3}-$hex{12}$ ]]; then
+    REALITY_ERR="the UUID is missing or malformed"
+  elif ! [[ ${R_HOST:-} =~ ^[A-Za-z0-9.:-]+$ ]]; then
+    REALITY_ERR="the server address is missing or malformed"
+  elif ! [[ ${R_PORT:-} =~ ^[0-9]{1,5}$ ]] || (( 10#$R_PORT < 1 || 10#$R_PORT > 65535 )); then
+    REALITY_ERR="the port is missing or malformed"
+  elif ! [[ ${R_SNI:-} =~ ^[A-Za-z0-9.-]+$ ]]; then
+    REALITY_ERR="the mask site (sni) is missing or malformed"
+  elif ! [[ ${R_PBK:-} =~ ^[A-Za-z0-9_-]{43}$ ]]; then
+    REALITY_ERR="the public key (pbk) is missing or malformed"
+  elif ! [[ ${R_SID:-} =~ ^($hex$hex){0,8}$ ]]; then
+    REALITY_ERR="the short id (sid) is malformed"
+  elif ! [[ ${R_SBVER:-} =~ ^([0-9]+\.[0-9]+\.[0-9]+[A-Za-z0-9.-]*)?$ ]]; then
+    REALITY_ERR="the sing-box version is malformed"
+  fi
+  [[ -z $REALITY_ERR ]] || return 1
+  R_PORT=$((10#$R_PORT))
+}
+
+# Both servers write the same vless:// link to reality.url and print it for
+# 'vpnctl show <client> reality', so it is the one thing every deployment can
+# hand this client. Parsed into the R_* values reality.env carries.
+parse_reality_url() {
+  local url=${1//[$'\r\n\t ']/} rest query kv security="" type=""
+  local -a pairs
+  R_UUID=""; R_HOST=""; R_PORT=""; R_SNI=""; R_PBK=""; R_SID=""
+  REALITY_ERR="not a vless:// link"
+  [[ $url == vless://*@* ]] || return 1
+  rest=${url#vless://}; rest=${rest%%#*}
+  R_UUID=${rest%%@*}; rest=${rest#*@}
+  query=""; [[ $rest == *\?* ]] && query=${rest#*\?}
+  rest=${rest%%\?*}
+  if [[ $rest == \[*\]:* ]]; then            # [IPv6]:port
+    R_HOST=${rest%%]*}; R_HOST=${R_HOST#\[}; R_PORT=${rest##*]:}
+  else
+    R_HOST=${rest%:*}; R_PORT=${rest##*:}
+  fi
+  IFS='&' read -ra pairs <<<"$query"
+  for kv in "${pairs[@]}"; do
+    case $kv in
+      security=*) security=${kv#*=} ;;
+      type=*)     type=${kv#*=} ;;
+      sni=*)      R_SNI=${kv#*=} ;;
+      pbk=*)      R_PBK=${kv#*=} ;;
+      sid=*)      R_SID=${kv#*=} ;;
+    esac
+  done
+  # A Caddy-fronted Windows server hands out VLESS over WebSocket+TLS under the
+  # same scheme. That is not REALITY, and this client cannot dial it.
+  if [[ $security != reality || ${type:-tcp} != tcp ]]; then
+    REALITY_ERR="security=${security:-none} type=${type:-tcp} is not a REALITY link"
+    return 1
+  fi
+  reality_ok
+}
+
 [[ $EUID -eq 0 ]] || die "Run as root:  sudo $0 $*"
-SRC=${1:-}
-[[ -n $SRC ]] || die "Usage: sudo $0 <client-directory>"
-[[ -d $SRC ]] || die "$SRC is not a directory. Copy the whole client directory from the server."
-SRC=${SRC%/}
-[[ -r $SRC/wg.conf ]] || die "$SRC/wg.conf not found — is this a yanvpn client directory?"
+USAGE="Usage: sudo $0 [--reality-only] [<client-directory> | <reality.url>]"
+ONLY=""; SRC=""
+while (( $# )); do
+  case $1 in
+    --reality-only) ONLY=reality ;;
+    -h|--help)      printf '%s\n' "$USAGE"; exit 0 ;;
+    # sudo logs its full command line, so a link given here is already on disk.
+    vless://*)      die "Don't pass the link as an argument: sudo logs it. Run with --reality-only and paste it when asked." ;;
+    -*)             die "Unknown option: $1"$'\n'"$USAGE" ;;
+    *)              [[ -z $SRC ]] || die "$USAGE"; SRC=${1%/} ;;
+  esac
+  shift
+done
+
+HAVE_REALITY=yes
+if [[ -z $SRC ]]; then
+  [[ $ONLY == reality ]] || die "$USAGE"
+  # Hidden, because it is a credential and terminals get shared and recorded.
+  [[ -t 0 ]] && printf 'Paste the REALITY link from the server (input is hidden): ' >&2
+  link=""; IFS= read -rs link || true
+  [[ -t 0 ]] && echo >&2
+  parse_reality_url "$link" || die "That is not a usable REALITY link: ${REALITY_ERR}."
+  unset link
+elif [[ -f $SRC ]]; then
+  ONLY=reality        # a lone file can only be a reality.url
+  parse_reality_url "$(head -n1 "$SRC")" || die "$SRC: ${REALITY_ERR}."
+elif [[ -d $SRC ]]; then
+  [[ $ONLY == reality || -r $SRC/wg.conf ]] \
+    || die "$SRC/wg.conf not found — is this a yanvpn client directory?"
+  if [[ -r $SRC/reality.env ]]; then
+    # shellcheck source=/dev/null
+    source "$SRC/reality.env"
+    reality_ok || die "$SRC/reality.env: ${REALITY_ERR}."
+  elif [[ -r $SRC/reality.url ]]; then
+    # A Windows server writes no reality.env: just the link, and its sing-box
+    # version alongside so both ends can still run the same build.
+    parse_reality_url "$(head -n1 "$SRC/reality.url")" || die "$SRC/reality.url: ${REALITY_ERR}."
+    [[ -r $SRC/sing-box-version.txt ]] && R_SBVER=$(tr -d '[:space:]' <"$SRC/sing-box-version.txt")
+    reality_ok || die "$SRC/sing-box-version.txt: ${REALITY_ERR}."
+  else
+    [[ $ONLY != reality ]] || die "$SRC has no REALITY profile (reality.env or reality.url)."
+    HAVE_REALITY=no
+  fi
+else
+  die "$SRC not found. Pass the client directory copied from the server, or its reality.url."
+fi
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 IF=yanvpn
 
-say "Installing yanvpn client"
+say "Installing yanvpn client${ONLY:+ (REALITY only)}"
 export DEBIAN_FRONTEND=noninteractive
-apt-get update -qq
+if [[ $ONLY == reality ]]; then
+  # curl and jq are all REALITY needs from apt, and are usually there already.
+  command -v curl >/dev/null && command -v jq >/dev/null \
+    || { apt-get update -qq && apt-get install -y -qq curl jq >/dev/null; }
+else
+  apt-get update -qq
+fi
 
 # ------------------------------------------------------------------ WireGuard
-apt-get install -y -qq wireguard wireguard-tools curl jq iputils-ping >/dev/null
-# wg-quick needs resolvconf to apply the tunnel's DNS setting. Without it the
-# 'DNS =' line is silently ignored and you keep using the local network's
-# filtered resolver, which is the whole thing we're avoiding.
-command -v resolvconf >/dev/null || command -v resolvectl >/dev/null \
-  || apt-get install -y -qq resolvconf >/dev/null
-install -d -m 700 /etc/wireguard
-install -m 600 "$SRC/wg.conf" "/etc/wireguard/${IF}.conf"
-ok "WireGuard      /etc/wireguard/${IF}.conf"
+if [[ $ONLY != reality ]]; then
+  apt-get install -y -qq wireguard wireguard-tools curl jq iputils-ping >/dev/null
+  # wg-quick needs resolvconf to apply the tunnel's DNS setting. Without it the
+  # 'DNS =' line is silently ignored and you keep using the local network's
+  # filtered resolver, which is the whole thing we're avoiding.
+  command -v resolvconf >/dev/null || command -v resolvectl >/dev/null \
+    || apt-get install -y -qq resolvconf >/dev/null
+  install -d -m 700 /etc/wireguard
+  install -m 600 "$SRC/wg.conf" "/etc/wireguard/${IF}.conf"
+  ok "WireGuard      /etc/wireguard/${IF}.conf"
+fi
 
 # ------------------------------------------------------------------ AmneziaWG
-if [[ -r $SRC/awg.conf ]]; then
+if [[ $ONLY != reality && -r $SRC/awg.conf ]]; then
   # shellcheck source=../../common/amneziawg-setup.sh
   source "$SCRIPT_DIR/../../common/amneziawg-setup.sh"
   ensure_amneziawg
@@ -55,10 +172,7 @@ if [[ -r $SRC/awg.conf ]]; then
 fi
 
 # -------------------------------------------------------------------- REALITY
-if [[ -r $SRC/reality.env ]]; then
-  # shellcheck source=/dev/null
-  source "$SRC/reality.env"
-
+if [[ $HAVE_REALITY == yes ]]; then
   if ! command -v sing-box >/dev/null; then
     case $(uname -m) in
       x86_64)  ARCH=amd64 ;;
@@ -189,6 +303,7 @@ if [[ -r $SRC/reality.env ]]; then
   if [[ -z $picked ]]; then
     printf '\n%sEvery sing-box config shape was rejected by %s:%s\n%s\n' \
       "$RED" "$(sing-box version | awk 'NR==1{print $3}')" "$RST" "$errs"
+    [[ $ONLY == reality ]] && die "Cannot configure REALITY."
     die "Cannot configure REALITY. WireGuard and AmneziaWG are installed and usable."
   fi
   chmod 600 /etc/sing-box/yanvpn.json
@@ -215,6 +330,14 @@ EOF
   systemctl daemon-reload
   systemctl disable yanvpn-singbox >/dev/null 2>&1 || true
 fi
+
+# ----------------------------------------------------------------- transports
+# 'yanvpn up' tries every transport it finds a config for, so a REALITY-only
+# install has to say so -- or a WireGuard config left by an earlier full install
+# would still be tried first.
+CLIENT_CONF=/etc/yanvpn-client.conf
+[[ -f $CLIENT_CONF ]] && sed -i '/^TRANSPORTS=/d' "$CLIENT_CONF"
+[[ $ONLY == reality ]] && echo 'TRANSPORTS="reality"' >>"$CLIENT_CONF"
 
 # -------------------------------------------------------------------- watch
 # Two things go wrong after a successful connect, and nothing used to notice
@@ -257,7 +380,21 @@ systemctl enable --now yanvpn-watch.timer >/dev/null 2>&1 || true
 ok "CLI            /usr/local/bin/yanvpn"
 ok "watch          every 2 min: re-resolves, and fails over if the tunnel dies"
 
-cat <<EOF
+if [[ $ONLY == reality ]]; then
+  cat <<EOF
+
+${BOLD}Done.${RST}
+
+    sudo yanvpn up        connect over REALITY (TCP ${R_PORT})
+    sudo yanvpn status    check
+    sudo yanvpn down      disconnect
+
+If 'up' fails, 'sudo yanvpn doctor' says whether this network or the server is
+to blame.
+
+EOF
+else
+  cat <<EOF
 
 ${BOLD}Done.${RST}
 
@@ -273,3 +410,4 @@ It probes every transport and port and tells you what that network is actually
 blocking, instead of leaving you to guess.
 
 EOF
+fi

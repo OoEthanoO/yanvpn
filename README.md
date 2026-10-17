@@ -201,6 +201,34 @@ sudo ./client/linux/install.sh laptop/
 `/etc/yanvpn` is 0700, so a plain `scp` cannot read it and root SSH is usually
 disabled. Piping through `sudo tar` on the far side avoids both.
 
+#### REALITY only, on a Linux laptop
+
+To skip WireGuard and AmneziaWG entirely, the laptop needs nothing but the
+client's REALITY link. Print it on the server — on a Linux server:
+
+```bash
+sudo vpnctl show laptop reality
+```
+
+or on a Windows server, in an Administrator PowerShell. Windows' default
+execution policy refuses to run the script, so bypass it for this one process:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File "$env:ProgramData\yanvpn\vpnctl.ps1" show laptop reality
+```
+
+Then on the laptop, pasting the link when asked:
+
+```bash
+sudo ./client/linux/install.sh --reality-only
+```
+
+The prompt hides what you paste, and the installer refuses the link as an
+argument: it is a credential, and sudo logs its command line. A client
+directory copied from either server works too (`--reality-only laptop/`).
+`yanvpn up` then dials REALITY alone, and its messages name the port it really
+uses — 8443, against a Windows server in Dual mode.
+
 ### 5. Pin down a stable address
 
 ```bash
@@ -418,7 +446,7 @@ server/
   vpnctl              client management across all transports
   windows/            native Windows server, client registry, NAT, and DDNS
 client/linux/
-  install.sh          installs whichever transports the server offered
+  install.sh          installs whichever transports the server offered, or REALITY alone
   yanvpn              connect / doctor / fallback
 client/windows/       native Windows installer and fallback CLI (no WSL)
 ios/README.md         which app per transport

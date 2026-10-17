@@ -202,6 +202,58 @@ contains "reality url carries the pubkey" "$CU" "pbk=$T_PUB"
 contains "reality url carries the sni"   "$CU" "sni=www.example.com"
 contains "reality url uses vision flow"  "$CU" "flow=xtls-rprx-vision"
 
+# ---------------------------------------------------------- REALITY link parsing
+group "REALITY link parsing"
+# A REALITY-only client is configured from nothing but this link, so whatever
+# a server writes must come back out intact -- and anything else must not get
+# as far as the sing-box config or the download URL.
+eval "$(sed -n '/^reality_ok()/,/^}/p;/^parse_reality_url()/,/^}/p' "$REPO/client/linux/install.sh")"
+if parse_reality_url "$CU"; then t_pass "parses the Linux server's own link"
+else t_fail "parses the Linux server's own link" "$REALITY_ERR"; fi
+eq "uuid survives"   "${R_UUID:-}" "$T_UUID_ALPHA"
+eq "host survives"   "${R_HOST:-}" "vpn.example.org"
+eq "port survives"   "${R_PORT:-}" "443"
+eq "sni survives"    "${R_SNI:-}"  "www.example.com"
+eq "pubkey survives" "${R_PBK:-}"  "$T_PUB"
+eq "sid survives"    "${R_SID:-}"  "abcdef0123456789"
+# The Windows server in Dual mode puts REALITY on 8443.
+WL="vless://$T_UUID_BETA@vpn.example.org:8443?type=tcp&security=reality&encryption=none&flow=xtls-rprx-vision&sni=www.apple.com&fp=chrome&pbk=$T_PUB&sid=0123456789abcdef#yanvpn-laptop"
+if parse_reality_url "$WL"; then t_pass "parses a Windows server's link"
+else t_fail "parses a Windows server's link" "$REALITY_ERR"; fi
+eq "keeps the Dual-mode port" "${R_PORT:-}" "8443"
+# Windows writes CRLF; without a #fragment to absorb it, the CR lands in sid.
+succeeds "tolerates a trailing CRLF" parse_reality_url "${WL%%#*}"$'\r\n'
+eq "and keeps it out of the sid" "${R_SID:-}" "0123456789abcdef"
+succeeds "parses an IPv6 literal" parse_reality_url \
+  "vless://$T_UUID_BETA@[2001:db8::7]:443?security=reality&sni=www.example.com&pbk=$T_PUB&sid=ab"
+eq "unwraps the brackets" "${R_HOST:-}" "2001:db8::7"
+succeeds "parses a zero-padded port" parse_reality_url \
+  "vless://$T_UUID_BETA@vpn.example.org:08443?security=reality&sni=www.example.com&pbk=$T_PUB"
+eq "reads it as decimal, not octal" "${R_PORT:-}" "8443"
+# A Caddy-fronted Windows server's link is VLESS over WebSocket+TLS, not
+# REALITY. Given every REALITY field too, so only the transport can reject it.
+fails "refuses a TLS link" parse_reality_url \
+  "vless://$T_UUID_BETA@vpn.example.org:443?type=tcp&security=tls&sni=www.example.com&pbk=$T_PUB"
+fails "refuses a WebSocket link" parse_reality_url \
+  "vless://$T_UUID_BETA@vpn.example.org:443?type=ws&security=reality&sni=www.example.com&pbk=$T_PUB&path=%2Fvpn"
+fails "refuses a non-vless link"   parse_reality_url "https://vpn.example.org/"
+fails "refuses shell in the host"  parse_reality_url \
+  "vless://$T_UUID_BETA@vpn.example.org\$(id):443?security=reality&sni=www.example.com&pbk=$T_PUB"
+fails "refuses a truncated pubkey" parse_reality_url \
+  "vless://$T_UUID_BETA@vpn.example.org:443?security=reality&sni=www.example.com&pbk=${T_PUB:0:20}"
+fails "refuses an impossible port" parse_reality_url \
+  "vless://$T_UUID_BETA@vpn.example.org:70000?security=reality&sni=www.example.com&pbk=$T_PUB"
+fails "refuses a malformed uuid"   parse_reality_url \
+  "vless://not-a-uuid@vpn.example.org:443?security=reality&sni=www.example.com&pbk=$T_PUB"
+# reality.env is sourced rather than parsed, so its values get the same check.
+R_UUID=$T_UUID_ALPHA R_HOST=vpn.example.org R_PORT=443 R_SNI=www.example.com R_PBK=$T_PUB R_SID=""
+R_SBVER=1.12.4; succeeds "accepts a pinned sing-box version"  reality_ok
+R_SBVER="";     succeeds "accepts no pinned version"          reality_ok
+# Read by reality_ok, which is eval'd in above.
+# shellcheck disable=SC2034
+R_SBVER='1.12.4/../../x'; fails "refuses a version that rewrites the URL" reality_ok
+unset R_UUID R_HOST R_PORT R_SNI R_PBK R_SID R_SBVER
+
 # ------------------------------------------------------------- name validation
 group "Client name validation"
 valid_name() { [[ $1 =~ ^[a-zA-Z0-9][a-zA-Z0-9_-]{0,30}$ ]]; }
@@ -279,6 +331,12 @@ if command -v jq >/dev/null; then
   eq "modern bootstraps with the system resolver" \
      "$(jq -r '.dns.servers[]|select(.tag=="local")|.type' <<<"$M")" "local"
   contains "modern sets a default domain resolver" "$M" "default_domain_resolver"
+  # Messages name the port REALITY really dials: a Dual-mode Windows server
+  # uses 8443, and "forward TCP 443" would send you to the wrong rule.
+  eval "$(sed -n '/^reality_port()/p' "$REPO/client/linux/yanvpn")"
+  R_PORT=8443 emit_conf modern >"$TMP/p.json"
+  eq "reports the port in the config" "$(SB_CONF="$TMP/p.json" reality_port)" "8443"
+  eq "falls back to 443 with no config" "$(SB_CONF="$TMP/none.json" reality_port)" "443"
   if command -v sing-box >/dev/null; then
     echo "$M" >"$TMP/m.json"
     succeeds "sing-box accepts the modern client config" sing-box check -c "$TMP/m.json"
@@ -302,6 +360,24 @@ eval "$(sed -n '/^ports_for()/,/^}/p' "$REPO/client/linux/yanvpn")"
 eq "wg port derived from its config"  "$(WG_PORTS='' ports_for wg)"  "51820"
 eq "awg port derived from its config" "$(AWG_PORTS='' ports_for awg)" "443"
 eq "site-local override wins" "$(WG_PORTS='1 2 3' ports_for wg)" "1 2 3"
+
+group "Transport selection"
+# A REALITY-only install must not fall back to a WireGuard config left behind
+# by an earlier full install.
+eval "$(sed -n '/^enabled()/p;/^have_wg()/p' "$REPO/client/linux/yanvpn")"
+# Read by have_wg, which is eval'd in above.
+# shellcheck disable=SC2034
+WG_CONF="$TMP/cl/wg.conf"
+unset TRANSPORTS
+succeeds "by default every transport is enabled" enabled awg
+succeeds "by default a WireGuard config is used"  have_wg
+# Read by enabled, which is eval'd in above.
+# shellcheck disable=SC2034
+TRANSPORTS=reality
+succeeds "reality-only keeps REALITY"             enabled reality
+fails    "reality-only drops AmneziaWG"           enabled awg
+fails    "reality-only ignores a WireGuard config" have_wg
+unset TRANSPORTS
 
 # ------------------------------------------------------- transport ordering
 group "Transport ordering"
